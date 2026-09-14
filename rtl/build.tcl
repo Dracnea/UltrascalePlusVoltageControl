@@ -9,7 +9,7 @@ set part [expr {[info exists ::env(PART)] ? $::env(PART) : "xcu55n-fsvh2892-2LV-
 set here [file dirname [file normalize [info script]]]
 
 create_project -force scbridge [file join $here build] -part $part
-add_files [file join $here scbridge_top.sv]
+add_files [list [file join $here sc_uart.sv] [file join $here scbridge_top.sv]]
 set_property file_type SystemVerilog [get_files *.sv]
 add_files -fileset constrs_1 [file join $here scbridge_c1100.xdc]
 set_property top scbridge_top [current_fileset]

@@ -80,12 +80,25 @@ so know what your bitstream contains.
 ## How it fits together
 
 ```
-host/scvolt.py    builds the controller frame, and verifies its own encoding
-host/sclink.py    carries bytes over JTAG BSCAN through Vivado
-host/scset.py     sets the rails and confirms the result with SYSMON
-rtl/              the bridge: a UART on the controller's pins, plus SYSMONE4
-changeVoltage.sh  the wrapper -- validate, guard, load, set, confirm
+host/scvolt.py       builds the controller frame, and verifies its own encoding
+host/sclink.py       carries bytes over JTAG BSCAN through Vivado
+host/scset.py        sets the rails and confirms the result with SYSMON
+rtl/sc_uart.sv       the controller's UART, as a module you can reuse
+rtl/scbridge_top.sv  sc_uart behind a JTAG register, plus SYSMONE4
+changeVoltage.sh     the wrapper -- validate, guard, load, set, confirm
 ```
+
+### Setting rails from a design that is already running
+
+`rtl/sc_uart.sv` is the reusable half. The top level above is a **probe**: load
+it, set a rail, load what you actually wanted. That works because the setpoint
+persists across reconfiguration — but it does mean a bitstream swap.
+
+If you would rather not swap, instantiate `sc_uart` directly behind whatever
+control channel your design already has. Its interface is one-cycle strobes —
+`cfg` / `q` / `burst` / `clr` / `rx_pop` — and it costs about 280 LUT. Then the
+running design sets its own rails and reads them back, with no swap and nothing
+to reload.
 
 `SYSMONE4` reads VCCINT **on the die**. It never consults the satellite
 controller, so the confirmation is an independent measurement rather than the
