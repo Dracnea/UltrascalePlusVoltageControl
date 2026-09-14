@@ -1,0 +1,15 @@
+# Vivado build trees -- outputs only, never a build directory
+rtl/build/
+rtl/.Xil/
+rtl/*.log
+rtl/*.jou
+rtl/*.rpt
+rtl/*.dcp
+clockInfo.txt
+cong/
+__pycache__/
+*.pyc
+
+# The bitstream is reproducible from rtl/ in a few minutes, and a 56 MB binary
+# does not belong in git history. Ship it as a release asset instead.
+rtl/*.bit
