@@ -23,14 +23,32 @@ STX = b"\x5c\x02"
 ETX = b"\x5c\x03"
 
 # --- commands ---------------------------------------------------------------
+#
+# Read out of the firmware image itself on 2026-09-17, not inferred from
+# traffic: the dispatcher at flash 0x6100 in scfw_c1100_1_3 decodes commands in
+# three pieces — a `tbh` jump table covering 0x01..0x0D, a compare chain for
+# 0x14/0x15/0x18/0x20/0x29/0x2B/0x2C, and a second chain for
+# 0x2D/0x31/0x32/0x6F/0x70/0x71. Anything else falls through to "Received
+# unknown command, msg ID is : %x". So this list is now known to be complete,
+# and the ids below are the ones whose behaviour has been traced.
 IDENTIFY   = 0x03   # -> 0x83   open session, first thing sent
 COMM_VER   = 0x04   # -> 0xFE   one data byte, min(ver, 9)
 SENSORS    = 0x05   # -> 0x85   read all sensors
-SET_RAILS  = 0x70   # -> --     1..3 records of [rail][mV_lo][mV_hi]
+START_MENU = 0x09   # -> 0x89   start the peripheral-test menu task (see below)
+SET_RAILS  = 0x70   # -> 0xFE   1..3 records of [rail][mV_lo][mV_hi]
 FW_VERSION = 0x71   # -> 0x72   TRM firmware version; a stock SC never answers
 POLL       = (0x06, 0x07, 0x08)
 NAK        = 0xFF
 # 0x01 enters the TI BSL to flash firmware. Deliberately not implemented.
+#
+# 0x09 is what TeamRedMiner's undocumented --fpga_enable_sc_menu sends. Its
+# handler creates a task whose entry point is the routine that prints
+# "PERIPHERAL TESTS MAIN MENU" and "Enter Option: ", with a 1 KiB stack, behind
+# a once-only flag — so sending it twice is harmless. The menu then appears on
+# the FT4232H UART channel that goes to the controller, at 115200, and offers
+# `Set VccInt` / `Set VccIntBram` / `Set VccIntHbm` (each prompting "Enter mV:"),
+# a full ISL68124 register dump, and `Get Board Info`. That is a rail write with
+# no bitstream and no JTAG in the path at all.
 
 RAIL_VCCINT  = 0x10
 RAIL_VCCBRAM = 0x36
@@ -38,14 +56,36 @@ RAIL_VCCMEM  = 0x34
 RAIL_NAME = {RAIL_VCCINT: "VCCINT", RAIL_VCCBRAM: "VCCBRAM", RAIL_VCCMEM: "VCCMEM"}
 
 # Floors are gated by SC firmware version, NOT by TRM's 600 mV clamp, which is
-# software and bypassable. See docs/sc-protocol.md.
+# software and bypassable. See docs/protocol.md.
+#
+# The 1.3 row is no longer a report from the controller that we take on trust:
+# it is the constant compared against in the firmware's own setter. Each rail
+# has a dedicated routine that range-checks the millivolt value and returns
+# failure without writing anything if it falls outside, then writes PMBus
+# VOUT_COMMAND (0x21) as a 16-bit little-endian count of millivolts:
+#
+#   set_vccint      flash 0xe920   accepts 0x1F4..0x3B6 =  500..950 mV
+#   set_vccint_bram flash 0xe93c   accepts 0x2BC..0x3B6 =  700..950 mV
+#   set_vcchbm      flash 0xe958   accepts 0x41A..0x546 = 1050..1350 mV
+#
+# The 1.2 and stock rows have never been read out of an image and remain
+# inherited assumptions. Treat them as such.
 FLOOR_MV = {           # fw -> (vccint, vccbram, vccmem)
     "1.3":   (500, 700, 1050),
     "1.2":   (625, 700, 1050),
     "stock": (675, 700, 1100),
 }
-CEILING_MV = (900, 950, 1350)   # never exceeded by this tool; overvolt is the
-                                # direction that destroys the part
+
+# What SC firmware 1.3 will actually accept, as above. Kept separate from the
+# tool's own ceiling so the two are never confused: this is a statement about
+# the controller, not a policy.
+FW_ACCEPT_MV = ((500, 950), (700, 950), (1050, 1350))
+
+# The tool's ceiling. VCCINT stops 50 mV below what the firmware would take,
+# because undervolting only makes the fabric go mute until it is reprogrammed
+# while overvolting destroys the part, and nothing this tool exists for needs
+# VCCINT above 900 mV. The other two are the firmware's own limits.
+CEILING_MV = (900, 950, 1350)
 DEFAULT_MV = (800, 850, 1200)   # the C1100's stock setpoints, in rail order
 
 RAIL_ORDER = (RAIL_VCCINT, RAIL_VCCBRAM, RAIL_VCCMEM)
@@ -111,15 +151,27 @@ def identify():        return frame(IDENTIFY)
 def comm_version(v=9): return frame(COMM_VER, bytes([min(v, 9)]))
 def sensors():         return frame(SENSORS)
 def fw_version():      return frame(FW_VERSION)
+def start_menu():      return frame(START_MENU)
 
 
 def set_rails(vccint_mv, vccbram_mv=None, vccmem_mv=None, fw="1.3"):
     """Build the 0x70 write.
 
-    TRM always sends all three rails, carrying the two it is not changing at
-    their present values — never a lone VCCINT record. A tool that sends one
-    record is doing something TRM has never done and nobody has tested, so pass
-    the other two (read them back with SENSORS first) rather than omitting them.
+    A one-record write is safe. The handler at flash 0x4f9c rejects a payload
+    whose length is not a multiple of three, then walks the records once to
+    check every rail id is 0x10, 0x34 or 0x36 — refusing the whole frame
+    without writing anything if one is not — and only then applies them. It
+    loops over however many records are present; there is nothing special about
+    three, and rails left out are simply not touched.
+
+    TeamRedMiner does always send all three, carrying the two it is not
+    changing at their present values, but that is TRM's habit rather than a
+    requirement of the controller.
+
+    One thing the handler does NOT do is roll back: records are applied in
+    payload order, so if the third is refused the first two are already live.
+    Keep VCCINT first, as TRM does, so the rail that matters is the one that
+    lands.
     """
     floors = FLOOR_MV[fw]
     recs, want = b"", ((RAIL_VCCINT, vccint_mv), (RAIL_VCCBRAM, vccbram_mv),
@@ -171,6 +223,19 @@ def selfcheck():
             print(f"  FAIL {bad} mV accepted ({why})"); ok = False
         except ValueError:
             print(f"  ok  refused {bad} mV ({why})")
+
+    # A lone VCCINT record, which the 0x70 handler accepts — checked here so the
+    # claim in set_rails() has something that fails if the codec ever drifts.
+    one = set_rails(700)
+    good = one == bytes.fromhex("5c0270000310bc0241015c03")
+    ok &= good
+    print(f"  {'ok ' if good else 'FAIL'} one-record 0x70  {one.hex()}")
+
+    menu = start_menu()
+    good = menu == bytes.fromhex("5c02090000" "0900" "5c03")
+    ok &= good
+    print(f"  {'ok ' if good else 'FAIL'} start menu 0x09  {menu.hex()}")
+
     print("ALL FRAMES REPRODUCE" if ok else "MISMATCH")
     return 0 if ok else 1
 
@@ -180,6 +245,12 @@ def describe(fw="1.3"):
     for i, rail in enumerate(RAIL_ORDER):
         print(f"  {RAIL_NAME[rail]:<8} floor {lo[i]:>5} mV   default {DEFAULT_MV[i]:>5} mV"
               f"   ceiling {hi[i]:>5} mV")
+    if fw == "1.3":
+        print("  (SC firmware 1.3 itself accepts "
+              + ", ".join(f"{RAIL_NAME[r]} {FW_ACCEPT_MV[i][0]}-{FW_ACCEPT_MV[i][1]}"
+                          for i, r in enumerate(RAIL_ORDER))
+              + " mV,")
+        print("   read out of its setter routines; it rejects rather than clamps.)")
 
 
 def main(argv):
@@ -223,10 +294,10 @@ def main(argv):
             print(f"  {RAIL_NAME[rail]:<8} -> {mv[i]} mV")
     missing = [RAIL_NAME[r] for i, r in enumerate(RAIL_ORDER) if mv[i] is None]
     if missing:
-        print("  NOTE: %s not in this frame. TeamRedMiner always writes all three,"
-              % ", ".join(missing))
-        print("        carrying the unchanged rails at their present values. Read them")
-        print("        back with SENSORS (0x05) and echo them rather than omitting them.")
+        print("  NOTE: %s not in this frame, so %s left untouched. The 0x70 handler"
+              % (", ".join(missing), "they are" if len(missing) > 1 else "it is"))
+        print("        loops over however many records it is given, so this is fine —")
+        print("        TeamRedMiner writes all three only out of habit.")
     print("\nframe:", f.hex())
     print("(frame only -- scset.py sends it and verifies with SYSMON)")
     return 0

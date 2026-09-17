@@ -22,7 +22,8 @@ SYSMON after: VCCINT 721 mV (751 before)
 ## Why this exists
 
 On these cards the FPGA fabric has **no I2C route to the core regulator**. A
-satellite controller — an MSP430 on the board — owns the rails, and it is
+satellite controller — a TI ARM Cortex-M microcontroller on the board — owns
+the rails, and it is
 reachable only over a UART that lands on fabric pins. AMD documents the
 architecture and calls the protocol proprietary; no published command sets a
 rail.
@@ -62,6 +63,28 @@ Each rail takes a millivolt number, `min` (the firmware's floor) or `default`
 that instantiates no BRAM and no HBM has no reason to hold VCCBRAM at 850 mV or
 VCCMEM at 1200 mV. A design that *does* use HBM will break if you drop VCCMEM,
 so know what your bitstream contains.
+
+### The controller's own menu
+
+The satellite controller carries an interactive peripheral-test menu that is not
+running until something starts it:
+
+```sh
+./changeVoltage.sh --enable-menu
+#   then open the controller's FTDI channel -- usually one of /dev/ttyUSB1..3 --
+#   at 115200 8N1 and press Enter
+```
+
+It offers **`Set VccInt`**, `Set VccIntBram` and `Set VccIntHbm`, each prompting
+`Enter mV:`, plus a full regulator register dump, sensor and power readouts, fan
+control, an EEPROM dump and `Get Board Info` (board name, revision, serial, MAC
+IDs, UUID, part number, memory size).
+
+`Set VccInt` there reaches the rail **with no bitstream and no JTAG in the
+path** — a serial terminal is enough once the menu is up. What this repository
+still gives you over the menu is the ability to start it, to script a change,
+and to verify one against SYSMON rather than against the controller's own
+telemetry.
 
 ## Safety
 

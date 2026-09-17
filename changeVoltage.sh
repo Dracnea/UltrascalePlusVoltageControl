@@ -4,6 +4,7 @@
 #   ./changeVoltage.sh --vccint 700                       core only
 #   ./changeVoltage.sh --vccint 700 --vccbram min --vccmem min
 #   ./changeVoltage.sh --limits                           what each rail allows
+#   ./changeVoltage.sh --enable-menu                      start the SC's own menu
 #
 # Each rail takes a millivolt number, `min` (the SC firmware's floor) or
 # `default` (the card's stock setpoint). Setting the memory rails to `min` is
@@ -37,9 +38,24 @@ die() { echo "changeVoltage: $*" >&2; exit 1; }
 [ $# -gt 0 ] || { python3 "$HERE/host/scvolt.py" --limits; echo; die "give at least one rail"; }
 
 # --- 1. validate the request first: no hardware is touched if it is bad
-FRAME_OUT="$(python3 "$HERE/host/scvolt.py" "$@")" || { echo "$FRAME_OUT" >&2; exit 2; }
-case "$*" in *--limits*|*--selfcheck*) echo "$FRAME_OUT"; exit 0 ;; esac
-grep -q '^frame: ' <<<"$FRAME_OUT" || { echo "$FRAME_OUT" >&2; die "no frame built"; }
+#
+# --enable-menu builds no rail frame -- it sends 0x09, which starts the
+# controller's own peripheral-test menu on its FTDI UART -- so it skips the
+# frame check but still takes the bridge path below, because 0x09 travels over
+# the same link as everything else.
+case "$*" in
+    *--enable-menu*)
+        case "$*" in
+            *--vccint*|*--vccbram*|*--vccmem*)
+                die "--enable-menu sets no rails; run it on its own" ;;
+        esac
+        ;;
+    *)
+        FRAME_OUT="$(python3 "$HERE/host/scvolt.py" "$@")" || { echo "$FRAME_OUT" >&2; exit 2; }
+        case "$*" in *--limits*|*--selfcheck*) echo "$FRAME_OUT"; exit 0 ;; esac
+        grep -q '^frame: ' <<<"$FRAME_OUT" || { echo "$FRAME_OUT" >&2; die "no frame built"; }
+        ;;
+esac
 
 # --- 2. the card has to be off the PCIe bus: this programs over JTAG, and
 #        dropping the link under a bound driver is how you get bus errors

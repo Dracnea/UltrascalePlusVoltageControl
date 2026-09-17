@@ -3,6 +3,7 @@
 
     scset.py --vccint 720 --vccbram min --vccmem min
     scset.py --show                       read the rails, change nothing
+    scset.py --enable-menu                start the controller's own test menu
 
 The bridge bitstream must already be loaded — changeVoltage.sh does that. The
 verification is SYSMON, which reads VCCINT on the die itself: it does not
@@ -26,6 +27,9 @@ def main(argv=None):
     ap.add_argument("--vccmem", default=None)
     ap.add_argument("--fw", default=None, help="override the detected SC firmware")
     ap.add_argument("--show", action="store_true")
+    ap.add_argument("--enable-menu", action="store_true",
+                    help="send 0x09 to start the SC's peripheral-test menu on its "
+                         "FTDI UART (115200 8N1), then exit")
     ap.add_argument("--settle", type=float, default=2.0)
     a = ap.parse_args(argv)
 
@@ -51,6 +55,17 @@ def main(argv=None):
             print("this controller has no rail-setting command; a stock SC cannot do it",
                   file=sys.stderr)
             return 2
+        if a.enable_menu:
+            r = ses.talk(scvolt.start_menu(), wait=1.0)
+            print("  sent: 0x09 start menu | reply:",
+                  f"cmd=0x{r[0]:02x} data={r[1].hex()}" if r else "(none)")
+            print("  The menu task is created once and then stays up, so a second")
+            print("  0x09 is harmless and will look identical.")
+            print("  Now open the controller's FTDI channel at 115200 8N1 and press")
+            print("  Enter; the three UART channels are usually /dev/ttyUSB1..3 and")
+            print("  only one of them answers.")
+            return 0
+
         if fw not in scvolt.FLOOR_MV:
             print(f"unknown firmware {fw}; refusing rather than guessing a floor", file=sys.stderr)
             return 2
