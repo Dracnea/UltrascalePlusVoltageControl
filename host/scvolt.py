@@ -95,9 +95,9 @@ def level(word, idx, fw="1.3"):
     """Resolve a rail argument: a number, `min`, or `default`.
 
     `min` is the point of this: a design that instantiates no BRAM and no HBM
-    has no reason to hold those rails at 850/1200 mV. The BLAKE3 farm is exactly
-    that case -- 0 BRAM tiles, 0 URAM, no HBM -- so both memory rails can sit on
-    the floor while VCCINT does the work.
+    has no reason to hold those rails at 850/1200 mV. A compute-bound design
+    with 0 BRAM tiles, 0 URAM and no HBM is exactly that case, and both memory
+    rails can sit on the floor while VCCINT does the work.
     """
     if isinstance(word, int):
         return word

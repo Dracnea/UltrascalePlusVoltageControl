@@ -9,8 +9,8 @@
 # Each rail takes a millivolt number, `min` (the SC firmware's floor) or
 # `default` (the card's stock setpoint). Setting the memory rails to `min` is
 # the point of taking all three: a design with no BRAM and no HBM has no reason
-# to hold VCCBRAM at 850 mV or VCCMEM at 1200 mV. The BLAKE3 farm is exactly
-# that shape — 0 BRAM tiles, 0 URAM, no HBM instantiated.
+# to hold VCCBRAM at 850 mV or VCCMEM at 1200 mV, and a compute-bound design
+# that instantiates 0 BRAM tiles, 0 URAM and no HBM is exactly that shape.
 #
 # It loads a small bitstream of ours (scbridge, ~300 LUT) purely to get a UART
 # onto the satellite controller's pins, then speaks the protocol in scvolt.py.

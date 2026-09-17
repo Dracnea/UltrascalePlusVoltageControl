@@ -87,7 +87,7 @@ class ScLink:
         self._cmd("open_hw_manager", timeout=180)
         self._cmd("connect_hw_server -allow_non_jtag", timeout=180)
         # Pick the target by SERIAL: hw_server probes every FTDI on the host, so
-        # index 0 is a coin flip on a bench with more than one card.
+        # index 0 is arbitrary on a bench with more than one card.
         if self.serial:
             self._cmd(f'set _t [lsearch -inline -glob [get_hw_targets] *{self.serial}*]')
             self._cmd(f'if {{$_t eq ""}} {{ error "no hw_target matching {self.serial}" }}')
