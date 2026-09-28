@@ -33,6 +33,12 @@
 //   Popping one byte at a time means a reply of any length can be read; there
 //   is no fixed capture window to overflow.
 //
+// QSFP LEDS
+//   The six QSFP28 LEDs are driven off (c1100_qsfp_leds_off.xdc). Left unused,
+//   UNUSEDPIN PULLUP lights them. This only holds while this image is loaded:
+//   whatever you load next decides, so add the same three ports to that design
+//   too, or see docs/qsfp-leds.md for doing it to an already-routed image.
+//
 // SAFETY
 //   SYSMON, LINES and RX are pure reads. Nothing here can flash controller
 //   firmware: this is a byte pipe, and the command that enters the bootloader
@@ -47,9 +53,16 @@ module scbridge_top #(
     output wire       hbm_cattrip,   // must be driven low or the card powers off
     inout  wire       sc_txd,
     inout  wire       sc_rxd,
-    input  wire [3:0] sc_gpio
+    input  wire [3:0] sc_gpio,
+    output wire [1:0] qsfp_led_act,    // QSFP28 LEDs, active-high: 0 = off
+    output wire [1:0] qsfp_led_stat_g,
+    output wire [1:0] qsfp_led_stat_y
 );
     assign hbm_cattrip = 1'b0;
+
+    assign qsfp_led_act    = 2'b00;
+    assign qsfp_led_stat_g = 2'b00;
+    assign qsfp_led_stat_y = 2'b00;
 
     wire clk_raw, clk;
     IBUFDS u_ibuf (.I(clk_p), .IB(clk_n), .O(clk_raw));

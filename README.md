@@ -108,8 +108,20 @@ host/sclink.py       carries bytes over JTAG BSCAN through Vivado
 host/scset.py        sets the rails and confirms the result with SYSMON
 rtl/sc_uart.sv       the controller's UART, as a module you can reuse
 rtl/scbridge_top.sv  sc_uart behind a JTAG register, plus SYSMONE4
+rtl/c1100_qsfp_leds_off.xdc  the six QSFP LED pins, for any C1100 design
+tools/qsfp_leds_eco.sh       QSFP LEDs off in an already-routed image
 changeVoltage.sh     the wrapper -- validate, guard, load, set, confirm
 ```
+
+### QSFP LEDs off
+
+The bridge also drives the card's six QSFP LEDs off, including the one beside
+the micro-USB socket. Left unused, `UNUSEDPIN PULLUP` lights them. The LEDs
+follow whichever image is loaded, so to keep them dark your own design has to
+drive them too: add three ports and `rtl/c1100_qsfp_leds_off.xdc`, or run
+`tools/qsfp_leds_eco.sh` on an image that is already routed. It uses no LUTs and
+cannot move timing. Findings, pins and process are in
+[docs/qsfp-leds.md](docs/qsfp-leds.md).
 
 ### Setting rails from a design that is already running
 
@@ -149,7 +161,8 @@ repository — no third-party bitstream was involved:
 | VCCINT 800, VCCBRAM 850, VCCMEM 1200 | 801 mV | +1 mV |
 
 The bridge costs **282 LUT / 371 FF** after routing — 0.03% of an xcu55n — and closes timing
-with 4.2 ns to spare at 100 MHz.
+with 4.2 ns to spare at 100 MHz (4.6 ns with the QSFP LED ports, which add no
+LUTs). All six QSFP LEDs confirmed dark on the card with the bridge loaded.
 
 Tested on one C1100. Reports from other cards and other UltraScale+ boards are
 welcome; [docs/protocol.md](docs/protocol.md) documents enough to extend it.

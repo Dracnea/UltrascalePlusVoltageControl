@@ -72,3 +72,7 @@ Pin assignments trace to Corundum's public Alveo targets
 `fpga/mqnic/Alveo`), which is where this card family's satellite-controller UART
 and GPIO assignments are published. They have been verified through
 place-and-route and on hardware here.
+
+The six QSFP28 LED pins (BL13, BK11, BJ11, BK14, BK15, BL12, bank 68,
+LVCMOS18, active-high) come from AMD's C1100 board files and the same Corundum
+AU55N target; see [qsfp-leds.md](qsfp-leds.md).
