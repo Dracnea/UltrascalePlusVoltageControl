@@ -34,7 +34,7 @@ years. It also insisted on fetching and loading its own mining bitstream before
 it would talk to the controller, so setting a voltage meant running a miner and
 hoping the script stopped it again.
 
-This does the same job with a 1.7 kLUT bridge bitstream you build yourself, a
+This does the same job with a bridge bitstream of under 300 LUTs you build yourself, a
 few hundred lines of stdlib Python, and no miner anywhere.
 
 ## What you need
@@ -148,8 +148,8 @@ repository — no third-party bitstream was involved:
 | VCCINT 720, VCCBRAM 700, VCCMEM 1050 | 720 mV | 0 |
 | VCCINT 800, VCCBRAM 850, VCCMEM 1200 | 801 mV | +1 mV |
 
-The bridge costs **261 LUT / 352 FF** — 0.03% of an xcu55n — and closes timing
-with 1.9 ns to spare at 100 MHz.
+The bridge costs **282 LUT / 371 FF** after routing — 0.03% of an xcu55n — and closes timing
+with 4.2 ns to spare at 100 MHz.
 
 Tested on one C1100. Reports from other cards and other UltraScale+ boards are
 welcome; [docs/protocol.md](docs/protocol.md) documents enough to extend it.
