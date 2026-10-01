@@ -1,13 +1,15 @@
 # UltraScale+ Voltage Control
 
 Set the VCCINT, VCCBRAM and VCCMEM rails on a **Xilinx Varium C1100 / Alveo
-U55N** from the host, and verify the result on the die — with no mining
+U55N** or an **Alveo U55C** from the host, and verify the result on the die — with no mining
 software, no vendor miner binary, and no bitstream you have to obtain from
 anyone.
 
 ```console
 $ ./changeVoltage.sh --vccint 720 --vccbram min --vccmem min
-loading scbridge_c1100.bit ...
+loading the bridge ...
+  PART xcu50_u55n
+  BIT .../rtl/scbridge_c1100.bit
 loaded (End of startup status: HIGH).
 SYSMON: VCCINT 751 mV, VCCAUX 1807 mV, 29.4 C
 SC: firmware 1.3, extended command set present
@@ -39,7 +41,7 @@ few hundred lines of stdlib Python, and no miner anywhere.
 
 ## What you need
 
-- A C1100 / U55N whose satellite controller runs **extended firmware** that
+- A C1100 / U55N or U55C whose satellite controller runs **extended firmware** that
   implements the rail-setting command. Stock firmware does not have it and will
   refuse — see [docs/hardware.md](docs/hardware.md). **This project does not
   distribute that firmware**, and does not flash anything.
@@ -51,13 +53,20 @@ few hundred lines of stdlib Python, and no miner anywhere.
 ## Quickstart
 
 ```sh
-cd rtl && vivado -mode batch -source build.tcl && cd ..   # once, ~5 minutes
+cd rtl && vivado -mode batch -source build.tcl && cd ..   # once, ~5 minutes (C1100)
+cd rtl && BOARD=u55c vivado -mode batch -source build.tcl && cd ..   # U55C
 ./changeVoltage.sh --limits                               # what the rails allow
 ./changeVoltage.sh --vccint 720                           # set the core rail
 ```
 
 Each rail takes a millivolt number, `min` (the firmware's floor) or `default`
 (the card's stock setpoint).
+
+The card is identified from the part Vivado reports (`xcu50_u55n` or
+`xcu280_u55c`), which picks the bridge bitstream and the JTAG IR length (12 on
+the two-SLR U55N, 18 on the three-SLR U55C), and is cross-checked against the
+board name the controller itself returns. On a host with several cards, set
+`SCLINK_SERIAL` to the card's JTAG serial.
 
 **Setting the memory rails to `min` is the point of taking all three.** A design
 that instantiates no BRAM and no HBM has no reason to hold VCCBRAM at 850 mV or
@@ -164,7 +173,15 @@ The bridge costs **282 LUT / 371 FF** after routing — 0.03% of an xcu55n — a
 with 4.2 ns to spare at 100 MHz (4.6 ns with the QSFP LED ports, which add no
 LUTs). All six QSFP LEDs confirmed dark on the card with the bridge loaded.
 
-Tested on one C1100. Reports from other cards and other UltraScale+ boards are
+On an **Alveo U55C** running the same extended firmware, through the same
+code path with the U55C bridge:
+
+| request | on-die VCCINT | regulator `VOUT_CMD` / `OUT_VOLT` |
+|---|---|---|
+| VCCINT 780 (from 801) | 781 mV | 780 / 780, `STATUS` 0 |
+| VCCINT 800 (from 781) | 800 mV | |
+
+Tested on C1100s and one U55C. Reports from other cards and other UltraScale+ boards are
 welcome; [docs/protocol.md](docs/protocol.md) documents enough to extend it.
 
 ## If you are reimplementing this

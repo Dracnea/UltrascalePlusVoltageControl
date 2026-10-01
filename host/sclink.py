@@ -27,7 +27,9 @@ import subprocess
 import sys
 import time
 
-IR_LEN = 12                      # xcu55n: two 6-bit SLR fields
+IR_LEN = 12                      # xcu55n: two 6-bit SLR fields. Only a fallback:
+                                 # ScLink.open() reads the real length from Vivado
+                                 # (18 on the three-SLR U55C).
 _USER = {"USER1": 0x02, "USER2": 0x03, "USER3": 0x22}
 _FILLER = 0x24
 
@@ -56,6 +58,7 @@ class ScLink:
         # baked-in serial is somebody else's board.
         self.serial = serial or os.environ.get("SCLINK_SERIAL", "").strip()
         self.proc = None
+        self.ir_len, self.ir_user1, self.part = IR_LEN, IR_USER1, ""
 
     # ---- vivado plumbing ----------------------------------------------------
     def _cmd(self, tcl, timeout=120):
@@ -70,6 +73,15 @@ class ScLink:
                 return out
             out.append(line.rstrip("\n"))
         raise RuntimeError("vivado did not respond to: " + tcl.splitlines()[0])
+
+    @staticmethod
+    def _word(lines):
+        """The last single-token line of a puts, e.g. a property value."""
+        for s in reversed(lines):
+            s = s.strip()
+            if s and " " not in s and not s.startswith(("INFO:", "WARNING:")):
+                return s
+        return None
 
     @staticmethod
     def _hexword(lines):
@@ -96,6 +108,19 @@ class ScLink:
             self._cmd('if {$_n != 1} { error "expected one hw_target, found $_n --'
                       ' set SCLINK_SERIAL to choose" }')
             self._cmd('set _t [lindex [get_hw_targets] 0]')
+        # Ask Vivado what the device is before dropping to raw JTAG mode, where
+        # it no longer models one. The IR length is 6 bits per SLR, so a
+        # hard-coded 12 shifts USER1 into the wrong place on a three-SLR part
+        # and the bridge simply never answers.
+        self._cmd("open_hw_target $_t", timeout=180)
+        self.part = self._word(self._cmd(
+            "puts [get_property PART [lindex [get_hw_devices] 0]]")) or ""
+        n = self._word(self._cmd(
+            "puts [get_property IR_LENGTH [lindex [get_hw_devices] 0]]"))
+        if n and n.isdigit() and int(n) % 6 == 0:
+            self.ir_len = int(n)
+            self.ir_user1 = ir("USER1", self.ir_len)
+        self._cmd("close_hw_target")
         self._cmd("open_hw_target -jtag_mode 1 $_t", timeout=180)
         self._cmd("run_state_hw_jtag RESET")
         self._cmd("run_state_hw_jtag IDLE")
@@ -126,7 +151,7 @@ class ScLink:
         on the shift after it. Sending the command then a NOP is the read.
         """
         word = (op & 0xFF) | ((arg & 0xFFFFFFFF) << 8)
-        self._cmd(f"scan_ir_hw_jtag {IR_LEN} -tdi {IR_USER1}")
+        self._cmd(f"scan_ir_hw_jtag {self.ir_len} -tdi {self.ir_user1}")
         out = self._cmd(f"puts [scan_dr_hw_jtag 64 -tdi {word:016x}]")
         return self._hexword(out) or 0
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The C1100 satellite-controller protocol — codec and command set.
+"""The U55-family satellite-controller protocol — codec and command set.
 
 Stdlib only, and NOTHING HERE TOUCHES HARDWARE: it builds bytes and parses
 bytes. The transport lives elsewhere (sclink.py, over the scbridge BSCAN register); this is
@@ -86,12 +86,67 @@ FW_ACCEPT_MV = ((500, 950), (700, 950), (1050, 1350))
 # while overvolting destroys the part, and nothing this tool exists for needs
 # VCCINT above 900 mV. The other two are the firmware's own limits.
 CEILING_MV = (900, 950, 1350)
-DEFAULT_MV = (800, 850, 1200)   # the C1100's stock setpoints, in rail order
+
+# --- boards -----------------------------------------------------------------
+#
+# Both cards carry the same satellite controller, the same TRM 1.3 image and the
+# same ISL68124 regulators (VOUT_MAX 1000 mV on VCCINT/VCCBRAM on both), so the
+# protocol, floors and ceilings above do not change. What does change:
+#
+#   part    what Vivado reports for the device; picks the bridge bitstream
+#   ir      JTAG IR length -- 6 bits per SLR, so 12 on the two-SLR U55N and 18
+#           on the three-SLR U55C. sclink reads it from Vivado; this is the
+#           fallback and the cross-check.
+#   sc_name the board name the controller returns in its 0x05 sensor reply
+#   default the card's stock setpoints. The U55C ships at 850 mV VCCINT; TRM
+#           1.3 itself programs 800/865 mV at every SC boot on both cards.
+BOARDS = {
+    "c1100": {"name": "Varium C1100 / Alveo U55N", "part": "*u55n*", "ir": 12,
+              "sc_name": "C1100", "bit": "scbridge_c1100.bit",
+              "build_part": "xcu55n-fsvh2892-2LV-e", "default": (800, 850, 1200)},
+    "u55c":  {"name": "Alveo U55C", "part": "*u55c*", "ir": 18,
+              "sc_name": "U55C", "bit": "scbridge_u55c.bit",
+              "build_part": "xcu55c-fsvh2892-2L-e", "default": (850, 850, 1200)},
+}
+DEFAULT_MV = BOARDS["c1100"]["default"]   # kept for callers that predate BOARDS
+
+
+def board_for_part(part):
+    """Vivado's PART property (e.g. xcu280_u55c, xcu50_u55n) -> board key, or None."""
+    import fnmatch
+    for key, b in BOARDS.items():
+        if fnmatch.fnmatch((part or "").lower(), b["part"]):
+            return key
+    return None
+
+
+def sc_board_name(sensors_data):
+    """The board name (tag 0x27, NUL-terminated) out of a 0x05 sensor reply, or ''.
+
+    The reply also carries raw MAC bytes, which can contain 0x27 themselves, so
+    take the first 0x27 that follows a NUL and opens a printable string.
+    """
+    d = sensors_data or b""
+    i = d.find(b"\x00\x27")
+    while i >= 0:
+        j = d.find(b"\x00", i + 2)
+        name = d[i + 2:j if j > 0 else None]
+        if len(name) >= 3 and all(32 <= c < 127 for c in name):
+            return name.decode("ascii")
+        i = d.find(b"\x00\x27", i + 1)
+    return ""
+
+
+def board_for_sc_name(name):
+    for key, b in BOARDS.items():
+        if b["sc_name"] in (name or "").upper():
+            return key
+    return None
 
 RAIL_ORDER = (RAIL_VCCINT, RAIL_VCCBRAM, RAIL_VCCMEM)
 
 
-def level(word, idx, fw="1.3"):
+def level(word, idx, fw="1.3", board="c1100"):
     """Resolve a rail argument: a number, `min`, or `default`.
 
     `min` is the point of this: a design that instantiates no BRAM and no HBM
@@ -105,7 +160,7 @@ def level(word, idx, fw="1.3"):
     if w in ("min", "floor"):
         return FLOOR_MV[fw][idx]
     if w in ("default", "stock"):
-        return DEFAULT_MV[idx]
+        return BOARDS[board]["default"][idx]
     return int(w)
 
 
@@ -236,14 +291,24 @@ def selfcheck():
     ok &= good
     print(f"  {'ok ' if good else 'FAIL'} start menu 0x09  {menu.hex()}")
 
+    # Board identification, against what the two cards actually returned.
+    for part, name, want in (("xcu50_u55n", "C1100 PQ U55", "c1100"),
+                             ("xcu280_u55c", "ALVEO U55C PQ", "u55c")):
+        reply = b"\x21XFL1\x00\x0a\x35\x27\x00\x27" + name.encode() + b"\x00\x2b\x07"
+        got = (board_for_part(part), board_for_sc_name(sc_board_name(reply)))
+        good = got == (want, want)
+        ok &= good
+        print(f"  {'ok ' if good else 'FAIL'} board {part:<12} {name!r} -> {got}")
+
     print("ALL FRAMES REPRODUCE" if ok else "MISMATCH")
     return 0 if ok else 1
 
 
-def describe(fw="1.3"):
-    lo, hi = FLOOR_MV[fw], CEILING_MV
+def describe(fw="1.3", board="c1100"):
+    lo, hi, dflt = FLOOR_MV[fw], CEILING_MV, BOARDS[board]["default"]
+    print(f"  board {BOARDS[board]['name']}")
     for i, rail in enumerate(RAIL_ORDER):
-        print(f"  {RAIL_NAME[rail]:<8} floor {lo[i]:>5} mV   default {DEFAULT_MV[i]:>5} mV"
+        print(f"  {RAIL_NAME[rail]:<8} floor {lo[i]:>5} mV   default {dflt[i]:>5} mV"
               f"   ceiling {hi[i]:>5} mV")
     if fw == "1.3":
         print("  (SC firmware 1.3 itself accepts "
@@ -256,7 +321,7 @@ def describe(fw="1.3"):
 def main(argv):
     import argparse
     ap = argparse.ArgumentParser(
-        description="Build the satellite-controller frame that sets the C1100's rails.",
+        description="Build the satellite-controller frame that sets a C1100 / U55C's rails.",
         epilog="Each rail takes a millivolt number, `min` (the SC firmware's floor) "
                "or `default` (the card's stock setpoint). A design with no BRAM and "
                "no HBM should run both memory rails at min.")
@@ -265,6 +330,8 @@ def main(argv):
     ap.add_argument("--vccmem",  default=None, help="HBM/mem rail, mV | min | default")
     ap.add_argument("--fw", default="1.3", choices=sorted(FLOOR_MV),
                     help="SC firmware version; it gates the floors (default 1.3)")
+    ap.add_argument("--board", default="c1100", choices=sorted(BOARDS),
+                    help="card, for `default`; scset.py detects it from the device")
     ap.add_argument("--selfcheck", action="store_true", help="verify against the wire capture")
     ap.add_argument("--limits", action="store_true", help="print the rail limits and exit")
     a = ap.parse_args(argv)
@@ -273,7 +340,7 @@ def main(argv):
         return selfcheck()
     if a.limits or not any((a.vccint, a.vccbram, a.vccmem)):
         print(f"SC firmware {a.fw}:")
-        describe(a.fw)
+        describe(a.fw, a.board)
         if not a.limits:
             print("\nnothing to build: give at least one rail")
             return 2
@@ -282,7 +349,7 @@ def main(argv):
     mv = [None, None, None]
     for i, word in enumerate((a.vccint, a.vccbram, a.vccmem)):
         if word is not None:
-            mv[i] = level(word, i, a.fw)
+            mv[i] = level(word, i, a.fw, a.board)
     try:
         f = set_rails(mv[0], mv[1], mv[2], fw=a.fw)
     except ValueError as e:

@@ -1,4 +1,4 @@
-# Hardware notes — Varium C1100 / Alveo U55N
+# Hardware notes — Varium C1100 / Alveo U55N and Alveo U55C
 
 ## The rails, and which way is dangerous
 
@@ -18,15 +18,39 @@ trap: whatever you load next inherits it, including someone else's bitstream.
 
 ## Stock setpoints
 
-| rail | stock |
-|---|---|
-| VCCINT | 800 mV |
-| VCCBRAM | 850 mV |
-| VCCMEM | 1200 mV |
+| rail | C1100 / U55N | U55C |
+|---|---|---|
+| VCCINT | 800 mV | 850 mV |
+| VCCBRAM | 850 mV | 850 mV |
+| VCCMEM | 1200 mV | 1200 mV |
+
+These are the cards' stock setpoints, which `default` restores. The extended
+firmware (1.3) programs its own **800 mV VCCINT and 865 mV VCCBRAM at every
+controller boot** on both cards, before the FPGA is configured, so a freshly
+powered card reads those values rather than the stock ones.
 
 A design that instantiates **no BRAM and no HBM** has no reason to hold the
 memory rails up. Check your utilisation report before dropping VCCMEM: a design
 that does use HBM will fail if you do.
+
+## The U55C
+
+Same satellite controller, same firmware family and the same two ISL68124
+regulators as the C1100 (`VOUT_MAX` 1000 mV on VCCINT and VCCBRAM), so the
+protocol, floors and ceilings are unchanged. The differences that matter:
+
+- **Three SLRs, so an 18-bit JTAG IR** (USER1 `0x02924`) against the U55N's 12.
+  With a hard-coded 12 the bridge register is never selected and the card looks
+  mute; `sclink.py` now reads `IR_LENGTH` from Vivado.
+- **Vivado part `xcu280_u55c`** on the hardware side, `xcu55c-fsvh2892-2L-e` for
+  the build. The package and every pin the bridge uses are the same as the
+  C1100's, so `scbridge_c1100.xdc` serves both; only the part changes
+  (`BOARD=u55c`).
+- **Stock VCCINT is 850 mV**, and the card is passively cooled with a VCCINT
+  regulator that will overheat and trip the board under sustained load at
+  stock voltage. Lowering VCCINT is the main lever there.
+- The controller names itself `ALVEO U55C PQ` in its sensor reply (the C1100
+  says `C1100 PQ U55`), which the tool uses as a cross-check.
 
 ## Power and cooling
 

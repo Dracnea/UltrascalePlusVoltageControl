@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# changeVoltage — set the C1100's rails without TeamRedMiner.
+# changeVoltage — set a Varium C1100 / U55N or Alveo U55C's rails without TeamRedMiner.
 #
 #   ./changeVoltage.sh --vccint 700                       core only
 #   ./changeVoltage.sh --vccint 700 --vccbram min --vccmem min
@@ -11,6 +11,10 @@
 # the point of taking all three: a design with no BRAM and no HBM has no reason
 # to hold VCCBRAM at 850 mV or VCCMEM at 1200 mV, and a compute-bound design
 # that instantiates 0 BRAM tiles, 0 URAM and no HBM is exactly that shape.
+#
+# The card is identified from the part Vivado reports, which picks the bridge
+# (rtl/scbridge_c1100.bit or rtl/scbridge_u55c.bit; SCVOLT_BIT overrides). On a
+# host with more than one card, SCLINK_SERIAL picks the JTAG target.
 #
 # It loads a small bitstream of ours (scbridge, ~300 LUT) purely to get a UART
 # onto the satellite controller's pins, then speaks the protocol in scvolt.py.
@@ -27,7 +31,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-BIT="${SCVOLT_BIT:-$HERE/rtl/scbridge_c1100.bit}"
+BIT="${SCVOLT_BIT:-}"          # empty: chosen from the device's part below
 # The card's PCIe address, if it is enumerated. Auto-detected when there is
 # exactly one Xilinx device; set SCVOLT_PCI on a host with several.
 PCI="${SCVOLT_PCI:-$(lspci -Dn -d 10ee: 2>/dev/null | awk 'NR==1{print $1}')}"
@@ -92,9 +96,13 @@ if [ -n "$holder" ]; then
 fi
 
 # --- 4. load the bridge bitstream
-[ -f "$BIT" ] || die "bitstream not found: $BIT (build it: cd rtl && vivado -mode batch -source build.tcl)"
+#
+# The bridge is per part: a C1100 image will not load on a U55C and vice versa,
+# so the Tcl reads PART off the device and picks the matching file, and refuses
+# a part it does not know rather than guessing.
 [ -x "$VIVADO" ] || die "vivado not found at $VIVADO"
-echo "loading $(basename "$BIT") ..."
+[ -z "$BIT" ] || [ -f "$BIT" ] || die "bitstream not found: $BIT"
+SERIAL="${SCLINK_SERIAL:-}"
 # Vivado must source a FILE. `-source /dev/stdin` with a heredoc silently does
 # nothing: vivado reads stdin itself, runs no script, and exits in three
 # seconds -- which looked exactly like a successful load and cost a bring-up.
@@ -104,15 +112,36 @@ trap 'rm -f "$tcl" "$log"' EXIT
 cat > "$tcl" <<TCL
 open_hw_manager
 connect_hw_server -allow_non_jtag
-open_hw_target [lindex [get_hw_targets] 0]
+if {"$SERIAL" ne ""} {
+    set t [lsearch -inline -glob [get_hw_targets] *$SERIAL*]
+    if {\$t eq ""} { error "no hw_target matching $SERIAL" }
+} else {
+    if {[llength [get_hw_targets]] != 1} { error "more than one hw_target -- set SCLINK_SERIAL" }
+    set t [lindex [get_hw_targets] 0]
+}
+open_hw_target \$t
 set d [lindex [get_hw_devices] 0]
 current_hw_device \$d
-set_property PROGRAM.FILE {$BIT} \$d
+set part [get_property PART \$d]
+set bit {$BIT}
+if {\$bit eq ""} {
+    switch -glob -- \$part {
+        *u55c*  { set bit {$HERE/rtl/scbridge_u55c.bit} }
+        *u55n*  { set bit {$HERE/rtl/scbridge_c1100.bit} }
+        default { error "unsupported part \$part -- set SCVOLT_BIT to a bridge built for it" }
+    }
+}
+if {![file exists \$bit]} { error "bitstream not found: \$bit (build it: cd rtl && BOARD=... vivado -mode batch -source build.tcl)" }
+puts "PART \$part"
+puts "BIT \$bit"
+set_property PROGRAM.FILE \$bit \$d
 program_hw_devices \$d
 puts "PROGRAM_OK"
 close_hw_target
 TCL
+echo "loading the bridge ..."
 "$VIVADO" -mode batch -nojournal -nolog -source "$tcl" > "$log" 2>&1 || true
+grep -E "^(PART|BIT) " "$log" | sed 's/^/  /' || true
 if ! grep -q PROGRAM_OK "$log"; then
     echo "--- vivado ---" >&2; tail -20 "$log" >&2
     die "programming failed (no PROGRAM_OK)"

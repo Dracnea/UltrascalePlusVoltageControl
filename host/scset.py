@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Set the C1100's rails and prove it happened.
+"""Set a C1100 / U55N or U55C's rails and prove it happened.
 
     scset.py --vccint 720 --vccbram min --vccmem min
     scset.py --show                       read the rails, change nothing
@@ -26,6 +26,8 @@ def main(argv=None):
     ap.add_argument("--vccbram", default=None)
     ap.add_argument("--vccmem", default=None)
     ap.add_argument("--fw", default=None, help="override the detected SC firmware")
+    ap.add_argument("--board", default=None, choices=sorted(scvolt.BOARDS),
+                    help="override the board detected from the device")
     ap.add_argument("--show", action="store_true")
     ap.add_argument("--enable-menu", action="store_true",
                     help="send 0x09 to start the SC's peripheral-test menu on its "
@@ -38,6 +40,9 @@ def main(argv=None):
         if not sm:
             print("no reply from the bridge — is the bridge bitstream loaded?", file=sys.stderr)
             return 3
+        board = a.board or scvolt.board_for_part(link.part)
+        print(f"device: {link.part or '?'}, IR {link.ir_len}, board "
+              f"{scvolt.BOARDS[board]['name'] if board else 'UNKNOWN'}")
         print(f"SYSMON: VCCINT {sm['vccint_mv']} mV, VCCAUX {sm['vccaux_mv']} mV, "
               f"{sm['temp_c']:.1f} C")
         if a.show:
@@ -51,6 +56,14 @@ def main(argv=None):
         fwdata = h["fw"][1] if h["fw"] else b""
         fw = a.fw or ("%d.%d" % (fwdata[2], fwdata[3]) if len(fwdata) >= 4 else "stock")
         print(f"SC: firmware {fw}, extended command set {'present' if h['trm_firmware'] else 'ABSENT'}")
+        sc_name = scvolt.sc_board_name(h["sensors"][1] if h["sensors"] else b"")
+        sc_board = scvolt.board_for_sc_name(sc_name)
+        print(f"SC: board name {sc_name or '(not read)'}")
+        if board and sc_board and board != sc_board and not a.board:
+            print(f"the device says {board} but the controller says {sc_board}; "
+                  "refusing -- pass --board if you are sure", file=sys.stderr)
+            return 2
+        board = board or sc_board
         if not h["trm_firmware"]:
             print("this controller has no rail-setting command; a stock SC cannot do it",
                   file=sys.stderr)
@@ -70,9 +83,15 @@ def main(argv=None):
             print(f"unknown firmware {fw}; refusing rather than guessing a floor", file=sys.stderr)
             return 2
 
+        words = (a.vccint, a.vccbram, a.vccmem)
+        if not board and any(w is not None and str(w).lower() in ("default", "stock")
+                             for w in words):
+            print("board not identified, so `default` has no meaning; give mV or --board",
+                  file=sys.stderr)
+            return 2
         mv = []
-        for i, word in enumerate((a.vccint, a.vccbram, a.vccmem)):
-            mv.append(scvolt.level(word, i, fw) if word is not None else None)
+        for i, word in enumerate(words):
+            mv.append(scvolt.level(word, i, fw, board or "c1100") if word is not None else None)
         if not any(x is not None for x in mv):
             return 0
         try:

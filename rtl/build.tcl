@@ -1,11 +1,19 @@
-# Build scbridge for the Varium C1100 / Alveo U55N.
+# Build scbridge for the Varium C1100 / Alveo U55N, or the Alveo U55C.
 #
-#   vivado -mode batch -source build.tcl
-#   PART=xcu55n-fsvh2892-2LV-e vivado -mode batch -source build.tcl
+#   vivado -mode batch -source build.tcl                  C1100 -> scbridge_c1100.bit
+#   BOARD=u55c vivado -mode batch -source build.tcl       U55C  -> scbridge_u55c.bit
+#   PART=... vivado -mode batch -source build.tcl         override the part
 #
-# Produces scbridge_c1100.bit next to this script. Nothing here is card- or
-# site-specific beyond the part and the XDC.
-set part [expr {[info exists ::env(PART)] ? $::env(PART) : "xcu55n-fsvh2892-2LV-e"}]
+# The two cards share the FSVH2892 package and, by AMD's board files, the same
+# pins for everything the bridge touches (SC UART, clock, hbm_cattrip, QSFP
+# LEDs), so one XDC serves both; only the part and the output name change.
+set board [expr {[info exists ::env(BOARD)] ? [string tolower $::env(BOARD)] : "c1100"}]
+switch -- $board {
+    c1100   { set defpart xcu55n-fsvh2892-2LV-e }
+    u55c    { set defpart xcu55c-fsvh2892-2L-e }
+    default { error "BOARD must be c1100 or u55c, not '$board'" }
+}
+set part [expr {[info exists ::env(PART)] ? $::env(PART) : $defpart}]
 set here [file dirname [file normalize [info script]]]
 
 create_project -force scbridge [file join $here build] -part $part
@@ -35,5 +43,5 @@ puts "### LED gate PASS: six QSFP LEDs driven off"
 
 # Uncompressed, so a probe image is obvious next to a compressed application one.
 set_property BITSTREAM.GENERAL.COMPRESS FALSE [current_design]
-write_bitstream -force [file join $here scbridge_c1100.bit]
-puts "### BUILD OK: [file join $here scbridge_c1100.bit]"
+write_bitstream -force [file join $here scbridge_$board.bit]
+puts "### BUILD OK: [file join $here scbridge_$board.bit]"
