@@ -13,3 +13,10 @@ __pycache__/
 # The bitstream is reproducible from rtl/ in a few minutes, and a 56 MB binary
 # does not belong in git history. Ship it as a release asset instead.
 rtl/*.bit
+
+# The U55C board image's local build outputs; its prebuilt .bit.xz is tracked.
+boards/*/*.bit
+boards/*/util.rpt
+boards/*/build.log
+boards/*/clockInfo.txt
+boards/*/.Xil/

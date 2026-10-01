@@ -102,6 +102,13 @@ fi
 # a part it does not know rather than guessing.
 [ -x "$VIVADO" ] || die "vivado not found at $VIVADO"
 [ -z "$BIT" ] || [ -f "$BIT" ] || die "bitstream not found: $BIT"
+# Prebuilt bridges ship xz-compressed in rtl/prebuilt/ (~50 KB against 56-85 MB
+# raw); unpack any that has not been built or unpacked locally yet.
+for xzf in "$HERE"/rtl/prebuilt/scbridge_*.bit.xz; do
+    [ -f "$xzf" ] || continue
+    raw="$HERE/rtl/$(basename "${xzf%.xz}")"
+    [ -f "$raw" ] || { echo "unpacking $(basename "$xzf")"; xz -dc "$xzf" > "$raw"; }
+done
 SERIAL="${SCLINK_SERIAL:-}"
 # Vivado must source a FILE. `-source /dev/stdin` with a heredoc silently does
 # nothing: vivado reads stdin itself, runs no script, and exits in three

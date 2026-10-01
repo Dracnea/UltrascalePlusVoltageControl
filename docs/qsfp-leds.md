@@ -1,4 +1,11 @@
-# Turning off the C1100's QSFP LEDs
+# Turning off the C1100's (and U55C's) QSFP LEDs
+
+**The Alveo U55C uses the same six pins** (BL13, BK11, BJ11, BK14, BK15, BL12,
+LVCMOS18, active-high), so everything below applies to it unchanged:
+`rtl/c1100_qsfp_leds_off.xdc` and `tools/qsfp_leds_eco.sh` work on a U55C design
+as they are, and the U55C bridge drives them off. `boards/u55c/` has a small
+U55C image that does nothing but hold the LEDs off, `hbm_cattrip` low and
+measure the board clock, for leaving a card dark between jobs.
 
 The Varium C1100 / Alveo U55N has six LEDs on its bracket, three per QSFP28
 cage, and on an idle or headless card they stay lit whatever the FPGA is doing.

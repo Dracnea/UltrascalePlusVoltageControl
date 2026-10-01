@@ -45,12 +45,15 @@ few hundred lines of stdlib Python, and no miner anywhere.
   implements the rail-setting command. Stock firmware does not have it and will
   refuse — see [docs/hardware.md](docs/hardware.md). **This project does not
   distribute that firmware**, and does not flash anything.
-- Vivado, for building the bridge and loading it over JTAG. The bitstream is
-  not committed — it is a 56 MB binary that rebuilds from `rtl/` in minutes, and
-  a prebuilt one may be attached to a release.
+- Vivado, for loading the bridge over JTAG (and building it, if you do not use
+  the prebuilt one in `rtl/prebuilt/`).
 - Python 3, standard library only.
 
 ## Quickstart
+
+Prebuilt bridges for both cards are in `rtl/prebuilt/` as `.bit.xz` (about
+50 KB each; checksums in `SHA256SUMS`), and `changeVoltage.sh` unpacks them on
+first use. To build your own instead:
 
 ```sh
 cd rtl && vivado -mode batch -source build.tcl && cd ..   # once, ~5 minutes (C1100)
@@ -117,7 +120,9 @@ host/sclink.py       carries bytes over JTAG BSCAN through Vivado
 host/scset.py        sets the rails and confirms the result with SYSMON
 rtl/sc_uart.sv       the controller's UART, as a module you can reuse
 rtl/scbridge_top.sv  sc_uart behind a JTAG register, plus SYSMONE4
-rtl/c1100_qsfp_leds_off.xdc  the six QSFP LED pins, for any C1100 design
+rtl/c1100_qsfp_leds_off.xdc  the six QSFP LED pins, for any C1100 or U55C design
+rtl/prebuilt/        the bridge for each card, xz-compressed
+boards/u55c/         a U55C parking image: LEDs off, hbm_cattrip low, clock check
 tools/qsfp_leds_eco.sh       QSFP LEDs off in an already-routed image
 changeVoltage.sh     the wrapper -- validate, guard, load, set, confirm
 ```
