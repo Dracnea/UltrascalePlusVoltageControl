@@ -5,6 +5,15 @@ U55N** or an **Alveo U55C** from the host, and verify the result on the die — 
 software, no vendor miner binary, and no bitstream you have to obtain from
 anyone.
 
+VCCINT on a **TUL TH53 / TH55** is supported too:
+
+| board | rails | path to the regulator | status |
+|---|---|---|---|
+| Varium C1100 / Alveo U55N | VCCINT, VCCBRAM, VCCMEM | satellite controller (extended firmware) | verified on hardware |
+| Alveo U55C | VCCINT, VCCBRAM, VCCMEM | satellite controller (extended firmware) | verified on hardware |
+| TUL TH53 (xcvu33p) | VCCINT | PMBus regulator on fabric pins — [docs/th5x.md](docs/th5x.md) | built and simulated, **not yet run on a board** |
+| TUL TH55 (xcvu35p) | VCCINT | PMBus regulator on fabric pins — [docs/th5x.md](docs/th5x.md) | built and simulated, **not yet run on a board** |
+
 ```console
 $ ./changeVoltage.sh --vccint 720 --vccbram min --vccmem min
 loading the bridge ...
@@ -45,19 +54,22 @@ few hundred lines of stdlib Python, and no miner anywhere.
   implements the rail-setting command. Stock firmware does not have it and will
   refuse — see [docs/hardware.md](docs/hardware.md). **This project does not
   distribute that firmware**, and does not flash anything.
+- On a TH53 / TH55: nothing extra. The regulator is on fabric pins and needs
+  no special firmware; see [docs/th5x.md](docs/th5x.md).
 - Vivado, for loading the bridge over JTAG (and building it, if you do not use
   the prebuilt one in `rtl/prebuilt/`).
 - Python 3, standard library only.
 
 ## Quickstart
 
-Prebuilt bridges for both cards are in `rtl/prebuilt/` as `.bit.xz` (about
-50 KB each; checksums in `SHA256SUMS`), and `changeVoltage.sh` unpacks them on
+Prebuilt bridges for every board are in `rtl/prebuilt/` as `.bit.xz` (20-55
+KB each; checksums in `SHA256SUMS`), and `changeVoltage.sh` unpacks them on
 first use. To build your own instead:
 
 ```sh
 cd rtl && vivado -mode batch -source build.tcl && cd ..   # once, ~5 minutes (C1100)
 cd rtl && BOARD=u55c vivado -mode batch -source build.tcl && cd ..   # U55C
+cd rtl && BOARD=th53 vivado -mode batch -source build.tcl && cd ..   # TH53 (th55 likewise)
 ./changeVoltage.sh --limits                               # what the rails allow
 ./changeVoltage.sh --vccint 720                           # set the core rail
 ```
@@ -65,8 +77,9 @@ cd rtl && BOARD=u55c vivado -mode batch -source build.tcl && cd ..   # U55C
 Each rail takes a millivolt number, `min` (the firmware's floor) or `default`
 (the card's stock setpoint).
 
-The card is identified from the part Vivado reports (`xcu50_u55n` or
-`xcu280_u55c`), which picks the bridge bitstream and the JTAG IR length (12 on
+The card is identified from the part Vivado reports (`xcu50_u55n`,
+`xcu280_u55c`, `xcvu33p_CIV` or `xcvu35p`) before anything is loaded, which
+picks the rules the request is checked against, the bridge bitstream and the JTAG IR length (12 on
 the two-SLR U55N, 18 on the three-SLR U55C), and is cross-checked against the
 board name the controller itself returns. On a host with several cards, set
 `SCLINK_SERIAL` to the card's JTAG serial.
@@ -118,7 +131,12 @@ telemetry.
 host/scvolt.py       builds the controller frame, and verifies its own encoding
 host/sclink.py       carries bytes over JTAG BSCAN through Vivado
 host/scset.py        sets the rails and confirms the result with SYSMON
+host/vrmset.py       TH53/TH55: PMBus to the VCCINT regulator, with its interlocks
+host/boardguard.py   TH53/TH55: refuses look-alike boards before anything is loaded
 rtl/sc_uart.sv       the controller's UART, as a module you can reuse
+rtl/pmbus_i2c.sv     an I2C/PMBus master, as a module you can reuse (TH53/TH55)
+rtl/vrmbridge_top.sv pmbus_i2c behind the same JTAG register, plus SYSMONE4
+sim/                 pmbus_i2c against a behavioural regulator (sim/run.sh)
 rtl/scbridge_top.sv  sc_uart behind a JTAG register, plus SYSMONE4
 rtl/c1100_qsfp_leds_off.xdc  the six QSFP LED pins, for any C1100 or U55C design
 rtl/prebuilt/        the bridge for each card, xz-compressed

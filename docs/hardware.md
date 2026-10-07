@@ -1,5 +1,7 @@
 # Hardware notes — Varium C1100 / Alveo U55N and Alveo U55C
 
+(TUL TH53 / TH55: see [th5x.md](th5x.md). Nothing below applies to them.)
+
 ## The rails, and which way is dangerous
 
 **The risk is asymmetric, and it decides which direction is safe to explore.**

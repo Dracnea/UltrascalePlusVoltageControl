@@ -1,0 +1,138 @@
+# TUL TH53 and TH55
+
+The TH53 (xcvu33p) and TH55 (xcvu35p) are sister boards. Unlike the
+C1100/U55C, their VCCINT regulator is **not behind a satellite controller**: it
+is a PMBus device on an I2C bus wired straight to FPGA fabric pins. So the
+bridge for these boards, `vrmbridge`, is a small I2C master rather than a UART,
+and the host side speaks PMBus to the regulator directly.
+
+```console
+$ ./changeVoltage.sh --vccint 750
+identifying the card ...
+  PART xcvu35p
+request: VCCINT -> 750 mV (the regulator's own limits are checked on the card)
+loading the bridge ...
+...
+regulator 0x60: PMBus rev 0x33, VOUT_MODE 0x.., WRITE_PROTECT 0x00, STATUS_WORD 0x....
+  VOUT_COMMAND 720 mV, READ_VOUT 719 mV  (SYSMON 718 mV)
+  encoding confirmed: READ_VOUT 719 mV vs SYSMON 718 mV (+1)
+  VCCINT 720 -> 750 mV in steps of at most 20 mV
+    740 mV  (READ_VOUT 739)
+    750 mV  (READ_VOUT 749)
+SYSMON after: VCCINT 749 mV (718 before), READ_VOUT 749 mV
+  CONFIRMED on-die, -1 mV of the commanded value
+```
+
+(The transcript shows the expected shape. **This path has not yet been run on a
+TH53 or TH55 through this repository** — see [Status](#status).)
+
+## What is known about the boards
+
+All of this was measured on the boards themselves: a clock census, a pull-up
+sweep of bank 67, then an I2C scan of each pulled-up pair.
+
+| | TH53 | TH55 |
+|---|---|---|
+| Part (Vivado hardware) | `xcvu33p_CIV` | `xcvu35p` |
+| Part (build) | `xcvu33p_CIV-fsvh2104-2L-e` | `xcvu35p-fsvh2104-2LV-e` |
+| 100 MHz clock | BB18/BC18, LVDS, `DIFF_TERM_ADV TERM_100` | same |
+| VCCINT regulator | Infineon PMBus, 7-bit `0x60` | same |
+| PMBus pins | L12 (SCL) / L13 (SDA), bank 67, LVCMOS18, external pull-ups | same |
+| Shipped VCCINT | ~699 mV | ~718 mV |
+| JTAG | on-board FT4232H, seen by Vivado's own hw_server | same |
+
+The 100 MHz pair is easy to get wrong: **F13/F12 is dead on these boards**, and
+the oscillator is only seen with both termination properties set.
+
+On the regulator:
+
+- **`VOUT_COMMAND` (0x21) and `READ_VOUT` (0x8B) are plain millivolts**, not
+  PMBus LINEAR16: 720 means 0.720 V. Measured: writing 720, 750 and 800 moved
+  `READ_VOUT` to 719, 749 and 799, and SYSMON agreed.
+- `WRITE_PROTECT` (0x10) reads 0x00, so writes are accepted.
+- Its own envelope, as read from a TH55's regulator: `VOUT_MAX` 950 mV, OV
+  fault 977 mV, margin-high 875 mV, UV fault 425 mV. The TH53's has not been
+  read out; the tool reads it on every run either way.
+- The setpoint persists across FPGA reconfiguration, which is what makes a
+  probe-then-load sequence work.
+- Temperature (`READ_TEMPERATURE_1`, 0x8D) and current (`READ_IOUT`, 0x8C) are
+  LINEAR11. The current figure's scale has not been checked against a meter.
+- Only VCCINT is on this bus. There is no VCCBRAM or HBM-rail control here.
+
+## How the tool protects the part
+
+Every one of these is in `host/vrmset.py`, not in the bitstream:
+
+1. **It proves the encoding before it writes.** `READ_VOUT` has to agree with
+   SYSMON's on-die VCCINT within 25 mV, and `VOUT_COMMAND` with `READ_VOUT`.
+   If they do not, either this is not the VCCINT regulator or its encoding is
+   not millivolts, and nothing is written.
+2. **Ceiling 876 mV**, DS923's recommended maximum for VCCINT on parts run at
+   0.85 V. It is not overridable, and the regulator's own `VOUT_MAX` (−25 mV)
+   and OV fault limit (−50 mV) lower it further when they are lower.
+3. **Floor 600 mV**, raised to clear the regulator's UV fault (+75 mV) and
+   power-good thresholds (+25 mV) when it reports them. Undervolting does not
+   damage the part, but tripping UV or power-good can switch the rail **off**,
+   and on these boards that is a power cycle, not a reprogram.
+4. **Steps of at most 20 mV**, each written, read back and checked against
+   `STATUS_WORD`. A fault mid-ramp puts the rail back where it started.
+5. It never touches `WRITE_PROTECT` and refuses if it is set, and it refuses to
+   move a rail that already reports a fault.
+
+## Osprey E3xx boards are refused
+
+The Osprey E300 family (E309, E333, E335 and their C variants) uses the same
+dies as these boards. A plain E335 module even reports the TH55's IDCODE
+(`0x14b71093`), so the part alone cannot tell them apart. They are different
+boards in every way that matters here: their rails belong to the box's own
+controller, not to anything on the FPGA's pins, and loading any bitstream onto
+a module replaces the design it was running.
+
+`host/boardguard.py` refuses them **before the bridge is loaded and before any
+PMBus traffic**. Any one signal is enough, and there is no override:
+
+| check | when | an E3xx shows | a TH53 / TH55 shows |
+|---|---|---|---|
+| die variant | after the read-only identify | plain `xcvu33p` (E333) or `xcvu35p_CIV` (E335C) | `xcvu33p_CIV` (TH53), plain `xcvu35p` (TH55) |
+| XVC `getinfo:` | before Vivado opens an XVC target | `xvcServer_v1.0:2048`, on ports 2541-2543 | a different server |
+| the host behind XVC | same | controller API on :8200 (`/controller/getAllInfo`), Osprey page on :80 | neither |
+
+A local USB cable gets only the die check: a TH board's JTAG is its on-board
+FT4232H, and an E3xx module's JTAG is not wired to the host at all.
+
+The die rule leans on the TH55s measured so far being plain VU35P and
+the TH53s being CIV. A TH55 on a CIV die would be refused. That is the safe
+way to be wrong, and the fix is to add its IDCODE here once one is seen.
+
+Checked against a real E335: the controller-API signature identifies it and
+the guard refuses it (`boardguard.py --selftest` covers every row with fake
+endpoints). An E3xx's rails are set through its own controller.
+
+## Using it through a remote JTAG server
+
+If the card's JTAG is served over Xilinx Virtual Cable (for example by another
+program that already owns the USB device), point the tool at it:
+
+```sh
+SCLINK_XVC=192.0.2.10:2542 ./changeVoltage.sh --vccint 750
+```
+
+## Setting the rail from inside your own design
+
+`rtl/pmbus_i2c.sv` is the reusable half: one-cycle `go`, a mode, an address, a
+register and a 16-bit word in; read data and per-byte ACKs out. Clock
+stretching is honoured, and a bus held low aborts after 25 ms rather than
+hanging. It is simulated in `sim/` against a behavioural regulator, with and
+without clock stretching (`sim/run.sh`).
+
+## Status
+
+- **Built:** `vrmbridge_th53.bit` and `vrmbridge_th55.bit` route and meet
+  timing at 100 MHz.
+- **Simulated:** the I2C master, against a PMBus slave model: every transaction
+  shape, NACK from an absent address, clock stretching, and a stuck bus.
+- **Host logic tested** against a fake bridge (`vrmset.py --selftest`): ramp
+  steps, every refusal path.
+- **Not yet run on a TH53 or TH55.** The first person to do so: start with
+  `--show`, which reads everything and writes nothing, and check that the
+  regulator section matches the table above before setting anything.

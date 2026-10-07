@@ -20,3 +20,11 @@ boards/*/util.rpt
 boards/*/build.log
 boards/*/clockInfo.txt
 boards/*/.Xil/
+
+# vrmbridge build trees (TH53 / TH55) and simulator outputs
+rtl/build_*/
+sim/xsim.dir/
+sim/*.log
+sim/*.jou
+sim/*.pb
+sim/.Xil/

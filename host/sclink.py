@@ -57,6 +57,8 @@ class ScLink:
         # No default: a bench with more than one card must say which one, and a
         # baked-in serial is somebody else's board.
         self.serial = serial or os.environ.get("SCLINK_SERIAL", "").strip()
+        # host:port of a Xilinx Virtual Cable server instead of a local cable.
+        self.xvc = os.environ.get("SCLINK_XVC", "").strip()
         self.proc = None
         self.ir_len, self.ir_user1, self.part = IR_LEN, IR_USER1, ""
 
@@ -100,7 +102,11 @@ class ScLink:
         self._cmd("connect_hw_server -allow_non_jtag", timeout=180)
         # Pick the target by SERIAL: hw_server probes every FTDI on the host, so
         # index 0 is arbitrary on a bench with more than one card.
-        if self.serial:
+        if self.xvc:
+            self._cmd(f"open_hw_target -xvc_url TCP:{self.xvc}", timeout=180)
+            self._cmd("set _t [current_hw_target]")
+            self._cmd("close_hw_target")
+        elif self.serial:
             self._cmd(f'set _t [lsearch -inline -glob [get_hw_targets] *{self.serial}*]')
             self._cmd(f'if {{$_t eq ""}} {{ error "no hw_target matching {self.serial}" }}')
         else:
@@ -150,7 +156,9 @@ class ScLink:
         The register captures on the way in, so the answer to a command arrives
         on the shift after it. Sending the command then a NOP is the read.
         """
-        word = (op & 0xFF) | ((arg & 0xFFFFFFFF) << 8)
+        # 48 bits of argument: scbridge reads [39:8], vrmbridge [55:8], and
+        # each ignores what it does not use.
+        word = (op & 0xFF) | ((arg & 0xFFFFFFFFFFFF) << 8)
         self._cmd(f"scan_ir_hw_jtag {self.ir_len} -tdi {self.ir_user1}")
         out = self._cmd(f"puts [scan_dr_hw_jtag 64 -tdi {word:016x}]")
         return self._hexword(out) or 0
