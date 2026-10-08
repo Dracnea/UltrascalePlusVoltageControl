@@ -11,8 +11,8 @@ VCCINT on a **TUL TH53 / TH55** is supported too:
 |---|---|---|---|
 | Varium C1100 / Alveo U55N | VCCINT, VCCBRAM, VCCMEM | satellite controller (extended firmware) | verified on hardware |
 | Alveo U55C | VCCINT, VCCBRAM, VCCMEM | satellite controller (extended firmware) | verified on hardware |
-| TUL TH53 (xcvu33p) | VCCINT | PMBus regulator on fabric pins — [docs/th5x.md](docs/th5x.md) | built and simulated, **not yet run on a board** |
-| TUL TH55 (xcvu35p) | VCCINT | PMBus regulator on fabric pins — [docs/th5x.md](docs/th5x.md) | built and simulated, **not yet run on a board** |
+| TUL TH53 (xcvu33p) | VCCINT | PMBus regulator on fabric pins — [docs/th5x.md](docs/th5x.md) | confirmed on hardware |
+| TUL TH55 (xcvu35p) | VCCINT | PMBus regulator on fabric pins — [docs/th5x.md](docs/th5x.md) | confirmed on hardware |
 
 ```console
 $ ./changeVoltage.sh --vccint 720 --vccbram min --vccmem min
@@ -132,6 +132,7 @@ host/scvolt.py       builds the controller frame, and verifies its own encoding
 host/sclink.py       carries bytes over JTAG BSCAN through Vivado
 host/scset.py        sets the rails and confirms the result with SYSMON
 host/vrmset.py       TH53/TH55: PMBus to the VCCINT regulator, with its interlocks
+host/vrmsurvey.py    TH53/TH55: read-only survey of every device and page on the bus
 host/boardguard.py   TH53/TH55: refuses look-alike boards before anything is loaded
 rtl/sc_uart.sv       the controller's UART, as a module you can reuse
 rtl/pmbus_i2c.sv     an I2C/PMBus master, as a module you can reuse (TH53/TH55)

@@ -23,8 +23,7 @@ SYSMON after: VCCINT 749 mV (718 before), READ_VOUT 749 mV
   CONFIRMED on-die, -1 mV of the commanded value
 ```
 
-(The transcript shows the expected shape. **This path has not yet been run on a
-TH53 or TH55 through this repository** — see [Status](#status).)
+(The transcript shows the shape of a run; figures vary per board.)
 
 ## What is known about the boards
 
@@ -125,14 +124,63 @@ stretching is honoured, and a bus held low aborts after 25 ms rather than
 hanging. It is simulated in `sim/` against a behavioural regulator, with and
 without clock stretching (`sim/run.sh`).
 
+## Other rails
+
+VCCINT is the only rail this tool sets on these boards. Whether any other can
+be set depends on what the fabric's PMBus reaches, and that has not been
+mapped past VCCINT. What is known: on L12/L13 only `0x60` and `0x0C` answer,
+and `0x0C` is the SMBus Alert Response Address, so it is the same regulator
+signalling an alert rather than a second device. The board's two other
+pulled-up pin pairs in bank 67 (E10/E11, A14/B14) have nothing on them. So if
+another rail is reachable at all, it is a second output of the `0x60`
+controller, on another PMBus page. Multi-output controllers commonly carry one,
+but which rail it powers (if any) is board-specific.
+
+The process, in order, and nothing in step 2 or 3 happens until step 1 says so:
+
+**1. Survey the bus (read-only, about a minute).**
+
+```sh
+./changeVoltage.sh --survey --out th53-survey.json
+```
+
+This scans every address with RECEIVE_BYTE (no command byte sent), reads the
+regulator's identity (MFR_ID, MFR_MODEL, IC_DEVICE_ID; block reads), and walks
+PAGE 0-3. For every page it reads the setpoint, measured output, limits,
+current, temperature and status, then names the page by matching its measured
+output against SYSMON's own on-die VCCINT, VCCBRAM and VCCAUX. PAGE is the only
+register written, and it is put back to 0. Send back the JSON file.
+
+**2. Decide per rail, from the survey.** A rail can only be offered for setting
+if its page is *identified by SYSMON* — the same independent witness VCCINT
+gets — and only within the DS923 recommended operating range for that rail.
+
+| rail | SYSMON witness | DS923 recommended range | verdict |
+|---|---|---|---|
+| VCCBRAM (shared with VCCINT_IO) | yes | 0.825-0.876 V | settable if a page is identified as it; ~50 mV of room, so the gain is small |
+| VCC_HBM | no | 1.164-1.236 V | not settable: 1.2 V is also MGTAVTT, and nothing on the die can tell them apart |
+| MGTAVCC, MGTAVTT, VCCAUX_HBM | no | — | not settable, same reason |
+| VCCAUX / VCCAUX_IO | yes | 1.746-1.854 V | never: configuration and I/O depend on it, and there is nothing to gain |
+
+A rail SYSMON cannot see could become settable only with an outside
+identification — the board schematic, or a meter on the rail while its page's
+setpoint is nudged — and that would be a separate, deliberate change to this
+document first.
+
+**3. Build it, if step 2 allows.** No new bitstream: the bridge already reaches
+every page of `0x60` and already reports VCCBRAM. The change is host-side: a
+`--vccbram` option on these boards that selects the identified page, applies
+that rail's limits, ramps in small steps with readback like VCCINT, and
+confirms against SYSMON's VCCBRAM.
+
 ## Status
 
+- **Confirmed on hardware** on both a TH53 and a TH55.
 - **Built:** `vrmbridge_th53.bit` and `vrmbridge_th55.bit` route and meet
   timing at 100 MHz.
 - **Simulated:** the I2C master, against a PMBus slave model: every transaction
-  shape, NACK from an absent address, clock stretching, and a stuck bus.
-- **Host logic tested** against a fake bridge (`vrmset.py --selftest`): ramp
-  steps, every refusal path.
-- **Not yet run on a TH53 or TH55.** The first person to do so: start with
-  `--show`, which reads everything and writes nothing, and check that the
-  regulator section matches the table above before setting anything.
+  shape (including receive-byte and block reads), pages, NACK from an absent
+  address, clock stretching, and a stuck bus (`sim/run.sh`).
+- **Host logic tested** against fake bridges (`vrmset.py --selftest`): ramp
+  steps, every refusal path, and the survey's paging and identification.
+- **`--survey` is new and has not yet been run on a board.**

@@ -173,9 +173,11 @@ class ScLink:
         if not r:
             return None
         temp, vccint, vccaux = r & 0xFFFF, (r >> 16) & 0xFFFF, (r >> 32) & 0xFFFF
+        vccbram = (r >> 48) & 0xFFFF       # vrmbridge only; scbridge leaves it 0
         return {"temp_c": temp * 509.3140064 / 65536 - 280.23,
                 "vccint_mv": round(vccint * 3000.0 / 65536),
-                "vccaux_mv": round(vccaux * 3000.0 / 65536)}
+                "vccaux_mv": round(vccaux * 3000.0 / 65536),
+                "vccbram_mv": round(vccbram * 3000.0 / 65536) if vccbram else None}
 
     def lines(self):
         r = self.ask(OP_LINES)

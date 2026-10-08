@@ -6,6 +6,7 @@
 #   ./changeVoltage.sh --vccint 700 --vccbram min --vccmem min
 #   ./changeVoltage.sh --limits                           what each rail allows
 #   ./changeVoltage.sh --enable-menu                      start the SC's own menu
+#   ./changeVoltage.sh --survey --out survey.json         TH53/TH55: what else is on the bus
 #
 # Each rail takes a millivolt number, `min` (the SC firmware's floor) or
 # `default` (the card's stock setpoint). Setting the memory rails to `min` is
@@ -125,6 +126,7 @@ if [ "$FAMILY" = vrm ]; then
     python3 "$HERE/host/boardguard.py" --part "$PART_ID" "$@" || exit 4
     python3 "$HERE/host/vrmset.py" --check "$@" || exit 2
 else
+    case "$*" in *--survey*) die "--survey is for the TH53/TH55's PMBus; this card has a satellite controller" ;; esac
     case "$*" in
         *--enable-menu*)
             case "$*" in

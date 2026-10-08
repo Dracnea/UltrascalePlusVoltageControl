@@ -8,6 +8,12 @@
 //   3 READ_WORD   S addr+W reg Sr addr+R [d0]A [d1]~A P   (PMBus words are LE)
 //   4 WRITE_WORD  S addr+W reg d0 d1 P
 //   5 SEND_BYTE   S addr+W reg P                       e.g. CLEAR_FAULTS
+//   6 RECV_BYTE   S addr+R [d0]~A P                    presence probe that
+//                                                      sends no command byte
+//   7 BLOCK_READ  S addr+W reg Sr addr+R [n]A [b0]A .. [bk]~A P
+//                 wdata[7:0] = k; rdata = {n, bk}. One byte of a block per
+//                 transaction keeps the result register 16 bits wide; the
+//                 host walks k from 0 to n-1 (MFR_ID, MFR_MODEL, IC_DEVICE_ID).
 //
 // A NACK on the address ends the transaction at once with a STOP, and
 // addr_ack stays 0: that is how a missing regulator, or the wrong pins, shows.
@@ -47,7 +53,7 @@ module pmbus_i2c #(
     // Byte-level steps of a transaction.
     localparam [3:0] S_START = 4'd0, S_ADDRW = 4'd1, S_REG = 4'd2, S_D0 = 4'd3,
                      S_D1 = 4'd4, S_RESTART = 4'd5, S_ADDRR = 4'd6, S_R0 = 4'd7,
-                     S_R1 = 4'd8, S_STOP = 4'd9, S_END = 4'd10;
+                     S_R1 = 4'd8, S_STOP = 4'd9, S_END = 4'd10, S_RB = 4'd11;
 
     logic [2:0]  m = '0;
     logic [6:0]  a = '0;
@@ -59,7 +65,7 @@ module pmbus_i2c #(
     logic [1:0]  ph = '0;
     logic [3:0]  bitn = '0;          // 0..7 data, 8 = ack slot
     logic [7:0]  tx = '0, rx = '0;
-    logic        rx_ack_out = 1'b0;  // the ack we send after a read byte (0 = ACK)
+    logic [7:0]  bidx = '0;          // block bytes read so far after the count
     logic [$clog2(QTR+1)-1:0]          qcnt = '0;
     logic [$clog2(STRETCH_MAX+1)-1:0]  scnt = '0;
     logic        active = 1'b0;
@@ -75,8 +81,14 @@ module pmbus_i2c #(
 
     // Released-line levels for the current primitive and phase (1 = released).
     logic scl_rel, sda_rel;
-    wire  bitval = (bitn == 4'd8) ? ((step == S_R0 || step == S_R1) ? rx_ack_out : 1'b1)
-                 : ((step == S_R0 || step == S_R1) ? 1'b1 : tx[7 - bitn[2:0]]);
+    // The ACK we send after a byte we read: ACK when more is coming (the low
+    // byte of a word, a block's count, block bytes before k), NACK on the last.
+    wire  rd_step = (step == S_R0 || step == S_R1 || step == S_RB);
+    wire  rd_ack  = (step == S_R0) ? ~(m == 3'd3 || m == 3'd7)
+                  : (step == S_RB) ? (bidx == wd[7:0])
+                  : 1'b1;
+    wire  bitval = (bitn == 4'd8) ? (rd_step ? rd_ack : 1'b1)
+                 : (rd_step ? 1'b1 : tx[7 - bitn[2:0]]);
     always_comb begin
         case (prim)
             P_START:   begin scl_rel = (ph != 2'd3);  sda_rel = (ph == 2'd0); end
@@ -89,15 +101,16 @@ module pmbus_i2c #(
     // What the next step is, given the mode and the step just finished.
     function automatic [3:0] next_step(input [3:0] s, input [2:0] md);
         case (s)
-            S_START:   next_step = S_ADDRW;
+            S_START:   next_step = (md == 3'd6) ? S_ADDRR : S_ADDRW;
             S_ADDRW:   next_step = (md == 3'd0) ? S_STOP : S_REG;
-            S_REG:     next_step = (md == 3'd1 || md == 3'd3) ? S_RESTART
+            S_REG:     next_step = (md == 3'd1 || md == 3'd3 || md == 3'd7) ? S_RESTART
                                  : (md == 3'd2 || md == 3'd4) ? S_D0 : S_STOP;
             S_D0:      next_step = (md == 3'd4) ? S_D1 : S_STOP;
             S_D1:      next_step = S_STOP;
             S_RESTART: next_step = S_ADDRR;
             S_ADDRR:   next_step = S_R0;
-            S_R0:      next_step = (md == 3'd3) ? S_R1 : S_STOP;
+            S_R0:      next_step = (md == 3'd3) ? S_R1 : (md == 3'd7) ? S_RB : S_STOP;
+            S_RB:      next_step = S_RB;            // until byte k; see below
             S_R1:      next_step = S_STOP;
             default:   next_step = S_END;
         endcase
@@ -121,8 +134,6 @@ module pmbus_i2c #(
             S_D1:    tx <= wd[15:8];
             default: tx <= 8'h00;
         endcase
-        // ACK the low byte of a word read, NACK the last byte read.
-        rx_ack_out <= (s == S_R0 && m == 3'd3) ? 1'b0 : 1'b1;
     endtask
 
     always_ff @(posedge clk) begin
@@ -133,7 +144,7 @@ module pmbus_i2c #(
             if (go) begin
                 m <= mode; a <= addr; r <= reg_a; wd <= wdata;
                 addr_ack <= 1'b0; reg_ack <= 1'b0; data_ack <= 1'b0;
-                timeout <= 1'b0; rdata <= '0;
+                timeout <= 1'b0; rdata <= '0; bidx <= '0;
                 active <= 1'b1; busy <= 1'b1;
                 qcnt <= '0; scnt <= '0;
                 begin_step(S_START);
@@ -155,7 +166,7 @@ module pmbus_i2c #(
                     if (bitn == 4'd8) begin
                         // A read needs both address phases ACKed.
                         if (step == S_ADDRW)                    addr_ack <= ~sda_hi;
-                        if (step == S_ADDRR)                    addr_ack <= addr_ack & ~sda_hi;
+                        if (step == S_ADDRR)                    addr_ack <= (m == 3'd6 ? 1'b1 : addr_ack) & ~sda_hi;
                         if (step == S_REG)                      reg_ack  <= ~sda_hi;
                         if (step == S_D0)                       data_ack <= ~sda_hi;
                         if (step == S_D1)                       data_ack <= data_ack & ~sda_hi;
@@ -173,12 +184,19 @@ module pmbus_i2c #(
                     bitn <= bitn + 1'b1;
                 end else begin
                     // Step complete.
-                    if (step == S_R0) rdata[7:0]  <= rx;
+                    if (step == S_R0 && m == 3'd7) rdata[15:8] <= rx;   // block count
+                    else if (step == S_R0)         rdata[7:0]  <= rx;
                     if (step == S_R1) rdata[15:8] <= rx;
+                    if (step == S_RB) begin
+                        bidx <= bidx + 1'b1;
+                        if (bidx == wd[7:0]) rdata[7:0] <= rx;
+                    end
                     if (step == S_STOP) begin
                         active <= 1'b0; busy <= 1'b0; done <= 1'b1;
                     end else if ((step == S_ADDRW || step == S_ADDRR) && !addr_ack) begin
                         begin_step(S_STOP);                 // nobody home
+                    end else if (step == S_RB && bidx == wd[7:0]) begin
+                        begin_step(S_STOP);                 // byte k was the last
                     end else begin
                         begin_step(next_step(step, m));
                     end

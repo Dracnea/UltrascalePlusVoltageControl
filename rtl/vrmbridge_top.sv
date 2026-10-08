@@ -20,11 +20,11 @@
 //     out  [63:0] result
 //
 //     op 0x00  NOP     read the last result again
-//     op 0x01  SYSMON  result = {vccaux[15:0], vccint[15:0], temp[15:0]}
-//                      -- identical to scbridge
+//     op 0x01  SYSMON  result = {vccbram, vccaux, vccint, temp}, 16 bits each
+//                      -- scbridge's layout, plus VCCBRAM in the top word
 //     op 0x05  LINES   result = {ID, 38'd0, scl_lvl, sda_lvl, 8'd0}
 //     op 0x08  PMBUS   arg[2:0] mode, [14:8] addr, [23:16] reg, [39:24] data
-//                      (modes in pmbus_i2c.sv); result while running has
+//                      (modes 0-7 in pmbus_i2c.sv); result while running has
 //                      `busy`, and the finished result replaces it:
 //                      {ID, 26'd0, busy, done, timeout, data_ack, reg_ack,
 //                       addr_ack, data[15:0]}
@@ -78,7 +78,7 @@ module vrmbridge_top #(
     logic        den   = 1'b0;
     wire  [15:0] dout;
     wire         drdy;
-    logic [15:0] temp_code = '0, vccint_code = '0, vccaux_code = '0;
+    logic [15:0] temp_code = '0, vccint_code = '0, vccaux_code = '0, vccbram_code = '0;
     logic [1:0]  which = '0;
     logic [9:0]  sm_div = '0;
 
@@ -93,16 +93,19 @@ module vrmbridge_top #(
         den <= 1'b0;
         sm_div <= sm_div + 1'b1;
         if (sm_div == 10'd1023) begin
-            daddr <= (which == 2'd0) ? 8'h00 : (which == 2'd1) ? 8'h01 : 8'h02;
+            // status registers: 0x00 temp, 0x01 VCCINT, 0x02 VCCAUX, 0x06 VCCBRAM
+            daddr <= (which == 2'd0) ? 8'h00 : (which == 2'd1) ? 8'h01
+                   : (which == 2'd2) ? 8'h02 : 8'h06;
             den   <= 1'b1;
         end
         if (drdy) begin
             case (which)
                 2'd0: temp_code   <= dout;
                 2'd1: vccint_code <= dout;
-                default: vccaux_code <= dout;
+                2'd2: vccaux_code <= dout;
+                default: vccbram_code <= dout;
             endcase
-            which <= (which == 2'd2) ? 2'd0 : which + 1'b1;
+            which <= which + 1'b1;
         end
     end
 
@@ -148,7 +151,7 @@ module vrmbridge_top #(
         if (done) result <= pm_status;
         if (cmd_stb) begin
             case (op)
-                8'h01: result <= {16'd0, vccaux_code, vccint_code, temp_code};
+                8'h01: result <= {vccbram_code, vccaux_code, vccint_code, temp_code};
                 8'h05: result <= {ID, 38'd0, lvl_s, 8'd0};
                 8'h08: if (!busy) begin
                     mode  <= arg[2:0];

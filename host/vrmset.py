@@ -4,6 +4,8 @@
     vrmset.py --vccint 750            ramp the core rail to 750 mV
     vrmset.py --vccint default        back to the board's shipped setpoint
     vrmset.py --show                  read everything, change nothing
+    vrmset.py --survey [--out f.json] what else is on the bus: all pages, all
+                                      devices, the regulator's identity
     vrmset.py --limits                the limits this tool enforces
     vrmset.py --check --vccint 750    validate a request; no hardware
     vrmset.py --selftest              exercise the logic against a fake VRM
@@ -437,8 +439,14 @@ def check(a):
         print("REFUSED: only VCCINT's regulator is on the fabric bus on a TH53/TH55; "
               "--vccbram and --vccmem are C1100/U55C options", file=sys.stderr)
         return 2
+    if a.show or getattr(a, "survey", False):
+        if a.vccint is not None:
+            print("--show / --survey read only; drop --vccint", file=sys.stderr)
+            return 2
+        print("request: read only, nothing will be written")
+        return 0
     if a.vccint is None:
-        print("give --vccint", file=sys.stderr)
+        print("give --vccint, or --show / --survey", file=sys.stderr)
         return 2
     try:
         mv = target_mv(a.vccint, a.board)
@@ -466,6 +474,9 @@ def main(argv=None):
     ap.add_argument("--board", default=None, choices=sorted(BOARDS),
                     help="override the board detected from the device")
     ap.add_argument("--show", action="store_true", help="read only")
+    ap.add_argument("--survey", action="store_true",
+                    help="read-only discovery of every page and device on the bus")
+    ap.add_argument("--out", default=None, help="with --survey: write the report as JSON")
     ap.add_argument("--check", action="store_true", help="validate the request; no hardware")
     ap.add_argument("--limits", action="store_true")
     ap.add_argument("--selftest", action="store_true")
@@ -473,7 +484,8 @@ def main(argv=None):
     a = ap.parse_args(argv)
 
     if a.selftest:
-        return selftest()
+        import vrmsurvey
+        return selftest() | vrmsurvey.selftest()
     if a.limits:
         describe()
         return 0
@@ -492,6 +504,9 @@ def main(argv=None):
         with sclink.ScLink() as link:
             # Before any PMBus traffic: is the die a TH53/TH55's?
             boardguard.check_die(link.part, a.board)
+            if a.survey:
+                import vrmsurvey
+                return vrmsurvey.run(link, a)
             return run(link, a)
     except boardguard.Refused as e:
         print(boardguard.explain(e), file=sys.stderr)
