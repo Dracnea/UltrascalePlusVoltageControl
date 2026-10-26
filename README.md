@@ -77,6 +77,9 @@ cd rtl && BOARD=th53 vivado -mode batch -source build.tcl && cd ..   # TH53 (th5
 
 Each rail takes a millivolt number, `min` (the firmware's floor) or `default`
 (the card's stock setpoint).
+On the FK33, a target under DS923's minimum (or under the board's own power-on
+level, if that is lower) also needs `--below-spec`, and nothing is written while
+the die or a board sensor is at 85 °C or more: see [docs/fk33.md](docs/fk33.md).
 
 The card is identified from the part Vivado reports (`xcu50_u55n`,
 `xcu280_u55c`, `xcvu33p_CIV` or `xcvu35p`) before anything is loaded, which
@@ -115,8 +118,11 @@ telemetry.
 ## Safety
 
 - **The risk is asymmetric.** Undervolting makes the fabric stop meeting timing
-  and go quiet until it is reprogrammed; nothing is destroyed. Overvolting
-  destroys the part. The ceiling here is not overridable.
+  and go quiet until it is reprogrammed; it is not a known way to destroy the
+  part. Overvolting destroys it. The ceiling here is not overridable. (Below
+  spec, the board's regulators are also at the bottom of their range, and a
+  card with no regulator telemetry cannot show how they cope: the FK33 path
+  makes that an explicit `--below-spec`.)
 - **The setpoint is global and persists across reconfiguration.** Whatever you
   load next inherits it. That is also what makes this useful: set the rail, then
   load your design.
