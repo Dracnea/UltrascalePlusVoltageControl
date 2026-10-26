@@ -5,7 +5,7 @@ U55N** or an **Alveo U55C** from the host, and verify the result on the die — 
 software, no vendor miner binary, and no bitstream you have to obtain from
 anyone.
 
-VCCINT on a **TUL TH53 / TH55** is supported too:
+VCCINT on a **TUL TH53 / TH55**, and all three rails on an **SQRL FK33**, are supported too:
 
 | board | rails | path to the regulator | status |
 |---|---|---|---|
@@ -13,6 +13,7 @@ VCCINT on a **TUL TH53 / TH55** is supported too:
 | Alveo U55C | VCCINT, VCCBRAM, VCCMEM | satellite controller (extended firmware) | verified on hardware |
 | TUL TH53 (xcvu33p) | VCCINT | PMBus regulator on fabric pins — [docs/th5x.md](docs/th5x.md) | confirmed on hardware |
 | TUL TH55 (xcvu35p) | VCCINT | PMBus regulator on fabric pins — [docs/th5x.md](docs/th5x.md) | confirmed on hardware |
+| SQRL FK33 (xcvu33p) | VCCINT, VCCBRAM, VCCHBM | digital potentiometers on fabric pins; stock vs resistor-modded boards detected on-die — [docs/fk33.md](docs/fk33.md) | confirmed on hardware (stock board); no Vivado needed |
 
 ```console
 $ ./changeVoltage.sh --vccint 720 --vccbram min --vccmem min
@@ -133,7 +134,9 @@ host/sclink.py       carries bytes over JTAG BSCAN through Vivado
 host/scset.py        sets the rails and confirms the result with SYSMON
 host/vrmset.py       TH53/TH55: PMBus to the VCCINT regulator, with its interlocks
 host/vrmsurvey.py    TH53/TH55: read-only survey of every device and page on the bus
-host/boardguard.py   TH53/TH55: refuses look-alike boards before anything is loaded
+host/boardguard.py   TH53/TH55/FK33: refuses look-alike boards before anything is loaded
+host/fk33set.py      FK33: the three potentiometers, mod-state detection, the ramp
+host/ftdijtag.py     the bridge register and bitstream loading over an FTDI cable, no Vivado
 rtl/sc_uart.sv       the controller's UART, as a module you can reuse
 rtl/pmbus_i2c.sv     an I2C/PMBus master, as a module you can reuse (TH53/TH55)
 rtl/vrmbridge_top.sv pmbus_i2c behind the same JTAG register, plus SYSMONE4

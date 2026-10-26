@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # changeVoltage — set a Varium C1100 / U55N or Alveo U55C's rails without TeamRedMiner.
-# Also sets VCCINT on a TUL TH53 / TH55.
+# Also sets VCCINT on a TUL TH53 / TH55, and the rails of an SQRL FK33.
 #
 #   ./changeVoltage.sh --vccint 700                       core only
 #   ./changeVoltage.sh --vccint 700 --vccbram min --vccmem min
 #   ./changeVoltage.sh --limits                           what each rail allows
 #   ./changeVoltage.sh --enable-menu                      start the SC's own menu
 #   ./changeVoltage.sh --survey --out survey.json         TH53/TH55: what else is on the bus
+#   SCLINK_FTDI=<serial> ./changeVoltage.sh --vccint min --vccbram min --vccmem min
+#                                                         FK33, no Vivado: the FTDI is driven directly
 #
 # Each rail takes a millivolt number, `min` (the SC firmware's floor) or
 # `default` (the card's stock setpoint). Setting the memory rails to `min` is
@@ -48,17 +50,45 @@ VIVADO="${VIVADO:-$HOME/Xilinx/2026.1/Vivado/bin/vivado}"
 
 die() { echo "changeVoltage: $*" >&2; exit 1; }
 
-[ $# -gt 0 ] || { python3 "$HERE/host/scvolt.py" --limits; echo; python3 "$HERE/host/vrmset.py" --limits; echo; die "give at least one rail"; }
+limits() {
+    python3 "$HERE/host/scvolt.py" --limits; echo; python3 "$HERE/host/vrmset.py" --limits
+    echo; python3 "$HERE/host/fk33set.py" --limits
+}
+[ $# -gt 0 ] || { limits; echo; die "give at least one rail"; }
 
 # --limits and --selfcheck touch no hardware.
 case "$*" in
     *--limits*)
-        python3 "$HERE/host/scvolt.py" --limits; echo; python3 "$HERE/host/vrmset.py" --limits
+        limits
         exit 0 ;;
     *--selfcheck*)
-        python3 "$HERE/host/scvolt.py" --selfcheck && python3 "$HERE/host/vrmset.py" --selftest
+        python3 "$HERE/host/scvolt.py" --selfcheck && python3 "$HERE/host/vrmset.py" --selftest \
+            && python3 "$HERE/host/fk33set.py" --selftest && python3 "$HERE/host/boardguard.py" --selftest
         exit $? ;;
 esac
+
+# --- SCLINK_FTDI=<serial>: the Vivado-free path, for one-SLR boards on a local
+#     FTDI (the SQRL FK33). host/ftdijtag.py reads the IDCODE, loads the bridge
+#     with the standard JTAG configuration sequence and shifts its register; the
+#     same guard and checks as the Vivado path run first.
+if [ -n "${SCLINK_FTDI:-}" ]; then
+    for xzf in "$HERE"/rtl/prebuilt/vrmbridge_fk33.bit.xz; do
+        raw="$HERE/rtl/vrmbridge_fk33.bit"
+        [ -f "$xzf" ] && [ ! -f "$raw" ] && { echo "unpacking $(basename "$xzf")"; xz -dc "$xzf" > "$raw"; }
+    done
+    echo "identifying the card ..."
+    ID="$(python3 "$HERE/host/ftdijtag.py" --serial "$SCLINK_FTDI" --idcode)" || die "could not read the IDCODE over FTDI $SCLINK_FTDI"
+    PART_ID="$(sed -n 's/.*PART \([^ ]*\).*/\1/p' <<<"$ID")"
+    echo "  $ID"
+    GUARD="$(python3 "$HERE/host/boardguard.py" --part "$PART_ID" --target "ftdi:$SCLINK_FTDI" "$@")" || exit 4
+    echo "$GUARD"
+    case "$GUARD" in *"an FK33"*) ;; *) die "SCLINK_FTDI drives the SQRL FK33 only; use the Vivado path for this card" ;; esac
+    python3 "$HERE/host/fk33set.py" --check "$@" || exit 2
+    BIT="${SCVOLT_BIT:-$HERE/rtl/vrmbridge_fk33.bit}"
+    [ -f "$BIT" ] || die "bitstream not found: $BIT (build it: cd rtl && BOARD=fk33 vivado -mode batch -source build.tcl)"
+    python3 "$HERE/host/ftdijtag.py" --serial "$SCLINK_FTDI" --load "$BIT" || die "loading the bridge failed"
+    exec python3 "$HERE/host/fk33set.py" "$@"
+fi
 
 [ -x "$VIVADO" ] || die "vivado not found at $VIVADO"
 SERIAL="${SCLINK_SERIAL:-}"
@@ -85,6 +115,7 @@ if {"$XVC" ne ""} {
     }
     open_hw_target \$t
 }
+puts "TARGET \$t"
 set d [lindex [get_hw_devices] 0]
 current_hw_device \$d
 set part [get_property PART \$d]
@@ -104,6 +135,7 @@ fi
 echo "identifying the card ..."
 "$VIVADO" -mode batch -nojournal -nolog -source "$tcl" > "$log" 2>&1 || true
 PART_ID="$(sed -n 's/^PART //p' "$log" | head -1)"
+TARGET_ID="$(sed -n 's/^TARGET //p' "$log" | head -1)"
 if [ -z "$PART_ID" ]; then
     echo "--- vivado ---" >&2; tail -20 "$log" >&2
     die "could not read the device's part over JTAG"
@@ -123,8 +155,13 @@ if [ "$FAMILY" = vrm ]; then
     case "$*" in *--enable-menu*) die "--enable-menu is a satellite-controller command; a TH53/TH55 has none" ;; esac
     # The Osprey E3xx uses the same dies; refuse it on the die variant before
     # anything is loaded. (The XVC checks already ran in step 0.)
-    python3 "$HERE/host/boardguard.py" --part "$PART_ID" "$@" || exit 4
-    python3 "$HERE/host/vrmset.py" --check "$@" || exit 2
+    GUARD="$(python3 "$HERE/host/boardguard.py" --part "$PART_ID" --target "$TARGET_ID" "$@")" || exit 4
+    echo "$GUARD"
+    case "$GUARD" in
+        *"an FK33"*) FAMILY=fk33
+                     python3 "$HERE/host/fk33set.py" --check "$@" || exit 2 ;;
+        *)           python3 "$HERE/host/vrmset.py" --check "$@" || exit 2 ;;
+    esac
 else
     case "$*" in *--survey*) die "--survey is for the TH53/TH55's PMBus; this card has a satellite controller" ;; esac
     case "$*" in
@@ -196,10 +233,12 @@ done
 { open_target_tcl; cat <<TCL
 set bit {$BIT}
 if {\$bit eq ""} {
-    switch -glob -- \$part {
+    switch -glob -- [string tolower \$part] {
         *u55c*  { set bit {$HERE/rtl/scbridge_u55c.bit} }
         *u55n*  { set bit {$HERE/rtl/scbridge_c1100.bit} }
-        *vu33p* { set bit {$HERE/rtl/vrmbridge_th53.bit} }
+        *vu33p_civ* { set bit {$HERE/rtl/vrmbridge_th53.bit} }
+        *vu33p* { if {"$FAMILY" ne "fk33"} { error "a plain xcvu33p that the guard did not accept as an FK33" }
+                  set bit {$HERE/rtl/vrmbridge_fk33.bit} }
         *vu35p* { set bit {$HERE/rtl/vrmbridge_th55.bit} }
         default { error "unsupported part \$part -- set SCVOLT_BIT to a bridge built for it" }
     }
@@ -225,6 +264,9 @@ grep -qi "End of startup status: HIGH" "$log" \
     || echo "loaded (vivado reported no startup status -- verify before trusting it)."
 
 # --- 5. speak to the satellite controller, or to the regulator
+if [ "$FAMILY" = fk33 ]; then
+    exec python3 "$HERE/host/fk33set.py" "$@"
+fi
 if [ "$FAMILY" = vrm ]; then
     exec python3 "$HERE/host/vrmset.py" "$@"
 fi

@@ -82,7 +82,12 @@ module vrmbridge_top #(
     logic [1:0]  which = '0;
     logic [9:0]  sm_div = '0;
 
-    SYSMONE4 #(.INIT_40(16'h0000), .INIT_41(16'h0000), .INIT_42(16'h0400))
+    // SYSMON's ADC clock is DCLK / INIT_42[15:8] and must stay under ~5.2 MHz.
+    // Divide-by-4 has served the 100 MHz TH53/TH55 builds since they shipped and
+    // is kept for them; at the FK33's 200 MHz it ran the ADC at 50 MHz and every
+    // conversion read 0, so faster clocks get a divider that lands at <= 5 MHz.
+    localparam integer SM_DIV = (CLK_HZ > 100_000_000) ? (CLK_HZ + 4_999_999) / 5_000_000 : 4;
+    SYSMONE4 #(.INIT_40(16'h0000), .INIT_41(16'h0000), .INIT_42({8'(SM_DIV), 8'h00}))
     u_sysmon (
         .DADDR(daddr), .DCLK(clk), .DEN(den), .DI(16'h0000), .DWE(1'b0),
         .DO(dout), .DRDY(drdy), .RESET(1'b0),

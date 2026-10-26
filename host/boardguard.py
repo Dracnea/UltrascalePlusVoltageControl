@@ -26,8 +26,15 @@ FPGA. Any one of them is enough to refuse; there is no override.
 
 A local USB cable needs no network checks: a TH53/TH55's JTAG is an on-board
 FT4232H, and an E3xx module's JTAG is not wired to the host at all.
+
+The SQRL FK33 is a plain xcvu33p, the same die as an E333 module. It passes
+only on a local cable, and only when the JTAG target that was opened is an
+FTDI whose USB product string is SQRL's ("SQRL FK"), matched by serial number.
+An FK33 reached over XVC is refused: nothing on the far end can prove what it is.
 """
 import argparse
+import glob
+import os
 import socket
 import sys
 import urllib.request
@@ -44,6 +51,39 @@ EXPECT = {
     "th55": {"die": "vu35p", "civ": False,
              "other": "an xcvu35p_CIV is an Osprey E335C module, not a TH55 (plain xcvu35p)"},
 }
+SQRL_PRODUCT = "SQRL FK"
+
+
+def sqrl_cables(root="/sys/bus/usb/devices"):
+    """{serial: product} of every FTDI on this host whose product string is SQRL's."""
+    out = {}
+    for d in glob.glob(os.path.join(root, "*")):
+        try:
+            vid = open(os.path.join(d, "idVendor")).read().strip()
+            prod = open(os.path.join(d, "product")).read().strip()
+            ser = open(os.path.join(d, "serial")).read().strip()
+        except OSError:
+            continue
+        if vid == "0403" and prod.startswith(SQRL_PRODUCT):
+            out[ser] = prod
+    return out
+
+
+def check_fk33(part, target, xvc=None, cables=None):
+    """An FK33 is a plain xcvu33p on a local SQRL cable. Raises Refused."""
+    p = (part or "").lower()
+    if "vu33p" not in p or "_civ" in p:
+        raise Refused(f"part {part!r} is not an FK33's die (plain xcvu33p)")
+    if xvc:
+        raise Refused("an FK33 must be on a local cable: over XVC a plain xcvu33p "
+                      "cannot be told from an Osprey E333 module")
+    cables = sqrl_cables() if cables is None else cables
+    hits = [s for s in cables if s and s in (target or "")]
+    if len(hits) != 1:
+        raise Refused(f"the JTAG target {target!r} is not an SQRL FK cable "
+                      f"(SQRL cables on this host: {sorted(cables) or 'none'}); a plain "
+                      "xcvu33p on any other cable is treated as an E333 module")
+    return "fk33"
 
 
 class Refused(Exception):
@@ -135,8 +175,11 @@ def check_xvc(xvc, api_port=OSPREY_API_PORT, web_port=80, getinfo=True):
         raise Refused(f"{found}, {where}")
 
 
-def guard(part, xvc=None, board=None, getinfo=True, **ports):
-    """All checks. Returns the TH board key, or raises Refused."""
+def guard(part, xvc=None, board=None, getinfo=True, target=None, cables=None, **ports):
+    """All checks. Returns the board key, or raises Refused."""
+    p = (part or "").lower()
+    if board == "fk33" or (board is None and target and "vu33p" in p and "_civ" not in p):
+        return check_fk33(part, target, xvc, cables)
     key = check_die(part, board)
     if xvc:
         check_xvc(xvc, getinfo=getinfo, **ports)
@@ -146,7 +189,8 @@ def guard(part, xvc=None, board=None, getinfo=True, **ports):
 def explain(e):
     return (f"REFUSED (board guard): {e}\n"
             "  This tool sets VCCINT on TUL TH53/TH55 boards only. Osprey E3xx boards use "
-            "the same dies, but their rails belong to the box's own controller, and "
+            "the same dies (an FK33 is accepted on its own SQRL cable only), but their "
+            "rails belong to the box's own controller, and "
             "loading a bridge onto one of their modules would replace the design it is "
             "running. Nothing was loaded or sent.")
 
@@ -232,6 +276,21 @@ def selftest():
     case("Osprey API, getinfo skipped (link already open)",
          lambda: guard("xcvu35p", xvc=f"127.0.0.1:{other_xvc}", getinfo=False,
                        api_port=api, web_port=nothing), True)
+    sqrl = {"FK0000000001": "SQRL FK"}
+    case("FK33 on its SQRL cable", lambda: guard("xcvu33p", board="fk33",
+         target="localhost:3121/xilinx_tcf/Xilinx/FK0000000001A", cables=sqrl), False)
+    case("FK33 claimed, target is another cable", lambda: guard("xcvu33p", board="fk33",
+         target="localhost:3121/xilinx_tcf/Xilinx/XFL000000000", cables=sqrl), True)
+    case("FK33 claimed, no SQRL cable on the host", lambda: guard("xcvu33p", board="fk33",
+         target="localhost:3121/xilinx_tcf/Xilinx/FK0000000001A", cables={}), True)
+    case("plain vu33p on its SQRL cable, no --board", lambda: guard("xcvu33p",
+         target="localhost:3121/xilinx_tcf/Xilinx/FK0000000001A", cables=sqrl), False)
+    case("plain vu33p on another cable, no --board", lambda: guard("xcvu33p",
+         target="localhost:3121/xilinx_tcf/Xilinx/XFL000000000", cables=sqrl), True)
+    case("FK33 claimed over XVC", lambda: guard("xcvu33p", board="fk33",
+         xvc="127.0.0.1:2542", target="", cables=sqrl), True)
+    case("FK33 claimed on a TH53 die", lambda: guard("xcvu33p_CIV", board="fk33",
+         target="localhost:3121/xilinx_tcf/Xilinx/FK0000000001A", cables=sqrl), True)
     print(f"== {fails} failure(s)")
     return 1 if fails else 0
 
@@ -240,7 +299,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="Refuse Osprey E3xx boards before anything is loaded.")
     ap.add_argument("--part", default="")
     ap.add_argument("--xvc", default="")
-    ap.add_argument("--board", default=None, choices=sorted(EXPECT))
+    ap.add_argument("--board", default=None, choices=sorted(EXPECT) + ["fk33"])
+    ap.add_argument("--target", default="", help="the opened JTAG target (FK33 check)")
     ap.add_argument("--xvc-only", action="store_true",
                     help="only the XVC checks (2, 3); for before the part is known")
     ap.add_argument("--selftest", action="store_true")
@@ -256,10 +316,13 @@ def main(argv=None):
         print(f"board guard: {a.xvc} is not an Osprey E3xx box")
         return 0
     try:
-        key = guard(a.part, xvc=a.xvc or None, board=a.board)
+        key = guard(a.part, xvc=a.xvc or None, board=a.board, target=a.target)
     except Refused as e:
         print(explain(e), file=sys.stderr)
         return 4
+    if key == "fk33":
+        print(f"board guard: {a.part} on SQRL cable {a.target}: an FK33")
+        return 0
     print(f"board guard: {a.part} is a {key.upper()} die"
           + (f", and {a.xvc} is not an Osprey E3xx box" if a.xvc else ", on a local cable"))
     return 0
