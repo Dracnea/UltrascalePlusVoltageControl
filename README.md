@@ -31,6 +31,21 @@ SYSMON after: VCCINT 721 mV (751 before)
   CONFIRMED on-die, +1 mV of the commanded value
 ```
 
+## Install (no Vivado)
+
+Setting rails over an FTDI cable needs only Python 3.8+ and the system `libftdi1`.
+Vivado is needed only to *rebuild* the bridge bitstreams; the prebuilt ones ship in the package.
+
+```console
+$ sudo apt install ./upvc_0.1.0_all.deb      # or: pipx install .   /   pip install .
+$ upvc list
+$ upvc set --serial <serial> --vccint min --vccbram min --vccmem min
+```
+
+Per-board status of this path: the FK33 is hardware-proven; the C1100 / U55N, U55C, TH53 and
+TH55 are pending hardware test on the Vivado-free path. See [docs/install.md](docs/install.md)
+for the .deb, pipx, running from a checkout, the udev rule, and Windows notes.
+
 ## Why this exists
 
 On these cards the FPGA fabric has **no I2C route to the core regulator**. A

@@ -28,3 +28,8 @@ sim/*.log
 sim/*.jou
 sim/*.pb
 sim/.Xil/
+
+# packaging build outputs
+build/
+dist/
+*.egg-info/

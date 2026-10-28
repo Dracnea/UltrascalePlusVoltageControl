@@ -1,0 +1,4 @@
+# Let members of the plugdev group open the FTDI JTAG cables used by upvc.
+# 0403:6010 = FT2232H, 0403:6011 = FT4232H. Install: see docs/install.md.
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0403", ATTR{idProduct}=="6010", MODE="0660", GROUP="plugdev"
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="0403", ATTR{idProduct}=="6011", MODE="0660", GROUP="plugdev"
