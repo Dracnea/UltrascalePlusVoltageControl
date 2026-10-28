@@ -2,8 +2,9 @@
 """Talk to the satellite controller through the scbridge bitstream.
 
 No vendor miner, no third-party bitstream, no background process to stop. This
-drives rtl/scbridge_top.sv over JTAG BSCAN through Vivado's TCL mode, which is
-the only external dependency.
+drives rtl/scbridge_top.sv over JTAG BSCAN through Vivado's TCL mode. With
+SCLINK_FTDI set, host/ftdijtag.py drives the same register over the card's FTDI
+cable instead, and Vivado is not needed at all.
 
 THE BRIDGE REGISTER
     One BSCANE2 user register (USER1), 64 bits, shifted LSB first. Every shift
@@ -50,7 +51,64 @@ OP_NOP, OP_SYSMON, OP_CONFIG, OP_QUEUE, OP_RX, OP_LINES, OP_BURST, OP_CLEAR = (
     0, 1, 2, 3, 4, 5, 6, 7)
 
 
-class ScLink:
+class BridgeOps:
+    """What the bridge exposes, on top of a link's exchange(). Shared by ScLink
+    (Vivado) and ftdijtag.FtdiLink (a bare FTDI cable)."""
+
+    def ask(self, op, arg=0):
+        self.exchange(op, arg)
+        return self.exchange(OP_NOP)
+
+    # ---- what the bridge exposes -------------------------------------------
+    def sysmon(self):
+        r = self.ask(OP_SYSMON)
+        if not r:
+            return None
+        temp, vccint, vccaux = r & 0xFFFF, (r >> 16) & 0xFFFF, (r >> 32) & 0xFFFF
+        vccbram = (r >> 48) & 0xFFFF       # vrmbridge only; scbridge leaves it 0
+        return {"temp_c": temp * 509.3140064 / 65536 - 280.23,
+                "vccint_mv": round(vccint * 3000.0 / 65536),
+                "vccaux_mv": round(vccaux * 3000.0 / 65536),
+                "vccbram_mv": round(vccbram * 3000.0 / 65536) if vccbram else None}
+
+    def lines(self):
+        r = self.ask(OP_LINES)
+        return {"txd_edges": r & 0xFFFF, "rxd_edges": (r >> 16) & 0xFFFF,
+                "txd_level": bool(r >> 32 & 1), "rxd_level": bool(r >> 33 & 1),
+                "gpio": (r >> 34) & 0xF}
+
+    def configure(self, baud=115200, rx_pin=1, parity=True,
+                  tx_pin=0, tx_parity=True, tx_odd=False):
+        div = round(CLK_HZ / baud) & 0xFFFF
+        arg = (div | (rx_pin << 16) | (int(parity) << 17) | (tx_pin << 18)
+               | (int(tx_parity) << 19) | (int(tx_odd) << 20))
+        return self.ask(OP_CONFIG, arg)
+
+    def tx(self, data):
+        """Queue a whole frame, then send it back-to-back.
+
+        One JTAG round-trip costs tens of milliseconds, so a byte-per-round-trip
+        transmitter spreads a frame over seconds and the controller times out
+        between characters. The queue exists for exactly that reason.
+        """
+        self.exchange(OP_CLEAR)
+        for b in data:
+            self.exchange(OP_QUEUE, b)
+        self.exchange(OP_BURST)
+        time.sleep(0.002 + 0.0001 * len(data))   # ~87 us per 8E1 character
+
+    def rx(self, limit=64):
+        """Pop bytes until the bridge says the FIFO is empty."""
+        out = bytearray()
+        for _ in range(limit):
+            r = self.ask(OP_RX)
+            if not (r >> 8) & 1:
+                break
+            out.append(r & 0xFF)
+        return len(out), bytes(out)
+
+
+class ScLink(BridgeOps):
     def __init__(self, vivado=None, serial=None):
         self.vivado = vivado or os.environ.get(
             "VIVADO", os.path.expanduser("~/Xilinx/2026.1/Vivado/bin/vivado"))
@@ -162,58 +220,6 @@ class ScLink:
         self._cmd(f"scan_ir_hw_jtag {self.ir_len} -tdi {self.ir_user1}")
         out = self._cmd(f"puts [scan_dr_hw_jtag 64 -tdi {word:016x}]")
         return self._hexword(out) or 0
-
-    def ask(self, op, arg=0):
-        self.exchange(op, arg)
-        return self.exchange(OP_NOP)
-
-    # ---- what the bridge exposes -------------------------------------------
-    def sysmon(self):
-        r = self.ask(OP_SYSMON)
-        if not r:
-            return None
-        temp, vccint, vccaux = r & 0xFFFF, (r >> 16) & 0xFFFF, (r >> 32) & 0xFFFF
-        vccbram = (r >> 48) & 0xFFFF       # vrmbridge only; scbridge leaves it 0
-        return {"temp_c": temp * 509.3140064 / 65536 - 280.23,
-                "vccint_mv": round(vccint * 3000.0 / 65536),
-                "vccaux_mv": round(vccaux * 3000.0 / 65536),
-                "vccbram_mv": round(vccbram * 3000.0 / 65536) if vccbram else None}
-
-    def lines(self):
-        r = self.ask(OP_LINES)
-        return {"txd_edges": r & 0xFFFF, "rxd_edges": (r >> 16) & 0xFFFF,
-                "txd_level": bool(r >> 32 & 1), "rxd_level": bool(r >> 33 & 1),
-                "gpio": (r >> 34) & 0xF}
-
-    def configure(self, baud=115200, rx_pin=1, parity=True,
-                  tx_pin=0, tx_parity=True, tx_odd=False):
-        div = round(CLK_HZ / baud) & 0xFFFF
-        arg = (div | (rx_pin << 16) | (int(parity) << 17) | (tx_pin << 18)
-               | (int(tx_parity) << 19) | (int(tx_odd) << 20))
-        return self.ask(OP_CONFIG, arg)
-
-    def tx(self, data):
-        """Queue a whole frame, then send it back-to-back.
-
-        One JTAG round-trip costs tens of milliseconds, so a byte-per-round-trip
-        transmitter spreads a frame over seconds and the controller times out
-        between characters. The queue exists for exactly that reason.
-        """
-        self.exchange(OP_CLEAR)
-        for b in data:
-            self.exchange(OP_QUEUE, b)
-        self.exchange(OP_BURST)
-        time.sleep(0.002 + 0.0001 * len(data))   # ~87 us per 8E1 character
-
-    def rx(self, limit=64):
-        """Pop bytes until the bridge says the FIFO is empty."""
-        out = bytearray()
-        for _ in range(limit):
-            r = self.ask(OP_RX)
-            if not (r >> 8) & 1:
-                break
-            out.append(r & 0xFF)
-        return len(out), bytes(out)
 
 # --- the settled link parameters -------------------------------------------
 # MEASURED 2026-09-14 by sweeping both pins against all three parities: an

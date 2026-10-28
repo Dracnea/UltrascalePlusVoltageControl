@@ -31,6 +31,11 @@ The SQRL FK33 is a plain xcvu33p, the same die as an E333 module. It passes
 only on a local cable, and only when the JTAG target that was opened is an
 FTDI whose USB product string is SQRL's ("SQRL FK"), matched by serial number.
 An FK33 reached over XVC is refused: nothing on the far end can prove what it is.
+
+The Alveo-class cards share IDCODEs with boards this tool has no bridge for:
+xcu55n with the U50, xcu55c with the U280. On a local FTDI cable (the path that
+needs no Vivado) the card's own USB product string decides: a C1100 / U55N
+cable must name U55N or C1100, a U55C cable U55C. Anything else is refused.
 """
 import argparse
 import glob
@@ -52,10 +57,12 @@ EXPECT = {
              "other": "an xcvu35p_CIV is an Osprey E335C module, not a TH55 (plain xcvu35p)"},
 }
 SQRL_PRODUCT = "SQRL FK"
+# Alveo-class die -> the words one of its cables' product strings must contain.
+ALVEO_PRODUCTS = {"u55n": ("U55N", "C1100"), "u55c": ("U55C",)}
 
 
-def sqrl_cables(root="/sys/bus/usb/devices"):
-    """{serial: product} of every FTDI on this host whose product string is SQRL's."""
+def ftdi_cables(root="/sys/bus/usb/devices"):
+    """{serial: product} of every FTDI on this host, from sysfs (nothing is opened)."""
     out = {}
     for d in glob.glob(os.path.join(root, "*")):
         try:
@@ -64,9 +71,41 @@ def sqrl_cables(root="/sys/bus/usb/devices"):
             ser = open(os.path.join(d, "serial")).read().strip()
         except OSError:
             continue
-        if vid == "0403" and prod.startswith(SQRL_PRODUCT):
+        if vid == "0403":
             out[ser] = prod
     return out
+
+
+def sqrl_cables(root="/sys/bus/usb/devices"):
+    """{serial: product} of every FTDI on this host whose product string is SQRL's."""
+    return {s: p for s, p in ftdi_cables(root).items() if p.startswith(SQRL_PRODUCT)}
+
+
+def alveo_die(part):
+    p = (part or "").lower()
+    return next((k for k in ALVEO_PRODUCTS if k in p), None)
+
+
+def check_alveo(part, target, xvc=None, cables=None):
+    """A C1100 / U55N or U55C on a local FTDI cable whose product string names
+    it. Returns the die key, or raises Refused. Only the FTDI path calls this:
+    through Vivado the part and the bridge are matched as before."""
+    key = alveo_die(part)
+    if key is None:
+        raise Refused(f"part {part!r} is not a C1100 / U55N or U55C die")
+    if xvc:
+        raise Refused("the cable check needs a local cable; use the Vivado path over XVC")
+    cables = ftdi_cables() if cables is None else cables
+    hits = [s for s in cables if s and s in (target or "")]
+    if len(hits) != 1:
+        raise Refused(f"the JTAG target {target!r} is not an FTDI cable on this host "
+                      f"(cables: {sorted(cables) or 'none'})")
+    prod = cables[hits[0]]
+    want = ALVEO_PRODUCTS[key]
+    if not any(w in prod.upper() for w in want):
+        raise Refused(f"cable {hits[0]} says {prod!r}, not {' / '.join(want)}: the {part} die is "
+                      "shared with cards this tool has no bridge for")
+    return key
 
 
 def check_fk33(part, target, xvc=None, cables=None):
@@ -180,6 +219,8 @@ def guard(part, xvc=None, board=None, getinfo=True, target=None, cables=None, **
     p = (part or "").lower()
     if board == "fk33" or (board is None and target and "vu33p" in p and "_civ" not in p):
         return check_fk33(part, target, xvc, cables)
+    if board is None and alveo_die(p):
+        return check_alveo(part, target, xvc, cables)
     key = check_die(part, board)
     if xvc:
         check_xvc(xvc, getinfo=getinfo, **ports)
@@ -188,8 +229,9 @@ def guard(part, xvc=None, board=None, getinfo=True, target=None, cables=None, **
 
 def explain(e):
     return (f"REFUSED (board guard): {e}\n"
-            "  This tool sets VCCINT on TUL TH53/TH55 boards only. Osprey E3xx boards use "
-            "the same dies (an FK33 is accepted on its own SQRL cable only), but their "
+            "  This tool's PMBus path sets VCCINT on TUL TH53/TH55 boards only, and an "
+            "Alveo-class card on a bare cable must be named by that cable. Osprey E3xx boards use "
+            "the TH dies (an FK33 is accepted on its own SQRL cable only), but their "
             "rails belong to the box's own controller, and "
             "loading a bridge onto one of their modules would replace the design it is "
             "running. Nothing was loaded or sent.")
@@ -291,6 +333,20 @@ def selftest():
          xvc="127.0.0.1:2542", target="", cables=sqrl), True)
     case("FK33 claimed on a TH53 die", lambda: guard("xcvu33p_CIV", board="fk33",
          target="localhost:3121/xilinx_tcf/Xilinx/FK0000000001A", cables=sqrl), True)
+    alveo = {"XFL000000001": "A-U55C", "XFL000000002": "Varium C1100", "XFL000000003": "A-U50",
+             "XFL000000004": "A-U280"}
+    case("U55C on its own cable", lambda: guard("xcu280_u55c", target="ftdi:XFL000000001",
+         cables=alveo), False)
+    case("C1100 on its own cable", lambda: guard("xcu50_u55n", target="ftdi:XFL000000002",
+         cables=alveo), False)
+    case("xcu55n die on a U50 cable", lambda: guard("xcu50_u55n", target="ftdi:XFL000000003",
+         cables=alveo), True)
+    case("xcu55c die on a U280 cable", lambda: guard("xcu280_u55c", target="ftdi:XFL000000004",
+         cables=alveo), True)
+    case("U55C die, cable not on this host", lambda: guard("xcu280_u55c", target="ftdi:XFL999",
+         cables=alveo), True)
+    case("U55C over XVC", lambda: guard("xcu280_u55c", xvc="127.0.0.1:2542",
+         target="ftdi:XFL000000001", cables=alveo), True)
     print(f"== {fails} failure(s)")
     return 1 if fails else 0
 
@@ -322,6 +378,9 @@ def main(argv=None):
         return 4
     if key == "fk33":
         print(f"board guard: {a.part} on SQRL cable {a.target}: an FK33")
+        return 0
+    if key in ALVEO_PRODUCTS:
+        print(f"board guard: {a.part} on cable {a.target}: a {' / '.join(ALVEO_PRODUCTS[key])}")
         return 0
     print(f"board guard: {a.part} is a {key.upper()} die"
           + (f", and {a.xvc} is not an Osprey E3xx box" if a.xvc else ", on a local cable"))

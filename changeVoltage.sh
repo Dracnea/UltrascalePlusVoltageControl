@@ -8,7 +8,7 @@
 #   ./changeVoltage.sh --enable-menu                      start the SC's own menu
 #   ./changeVoltage.sh --survey --out survey.json         TH53/TH55: what else is on the bus
 #   SCLINK_FTDI=<serial> ./changeVoltage.sh --vccint min --vccbram min --vccmem min
-#                                                         FK33, no Vivado: the FTDI is driven directly
+#                                                         no Vivado: the card's FTDI is driven directly
 #
 # Each rail takes a millivolt number, `min` (the SC firmware's floor) or
 # `default` (the card's stock setpoint). Setting the memory rails to `min` is
@@ -22,6 +22,14 @@
 # or rtl/vrmbridge_th55.bit; SCVOLT_BIT overrides). On a host with more than one
 # card, SCLINK_SERIAL picks the JTAG target; SCLINK_XVC=host:port reaches a card
 # through a Xilinx Virtual Cable server instead of a local cable.
+#
+# SCLINK_FTDI=<serial of the card's FTDI> does all of it without Vivado:
+# host/ftdijtag.py reads the IDCODE, loads the same bridge and shifts its
+# register over the cable directly (libftdi1 only). Every board above works
+# this way; the board guard and the request checks run exactly as they do
+# through Vivado, and on an Alveo-class card the cable's own product string
+# must name it (host/boardguard.py). Vivado is then needed only to rebuild a
+# bridge, never to set a rail.
 #
 # It loads a small bitstream of ours (scbridge, ~300 LUT) purely to get a UART
 # onto the satellite controller's pins, then speaks the protocol in scvolt.py.
@@ -67,32 +75,14 @@ case "$*" in
         exit $? ;;
 esac
 
-# --- SCLINK_FTDI=<serial>: the Vivado-free path, for one-SLR boards on a local
-#     FTDI (the SQRL FK33). host/ftdijtag.py reads the IDCODE, loads the bridge
-#     with the standard JTAG configuration sequence and shifts its register; the
-#     same guard and checks as the Vivado path run first.
-if [ -n "${SCLINK_FTDI:-}" ]; then
-    for xzf in "$HERE"/rtl/prebuilt/vrmbridge_fk33.bit.xz; do
-        raw="$HERE/rtl/vrmbridge_fk33.bit"
-        [ -f "$xzf" ] && [ ! -f "$raw" ] && { echo "unpacking $(basename "$xzf")"; xz -dc "$xzf" > "$raw"; }
-    done
-    echo "identifying the card ..."
-    ID="$(python3 "$HERE/host/ftdijtag.py" --serial "$SCLINK_FTDI" --idcode)" || die "could not read the IDCODE over FTDI $SCLINK_FTDI"
-    PART_ID="$(sed -n 's/.*PART \([^ ]*\).*/\1/p' <<<"$ID")"
-    echo "  $ID"
-    GUARD="$(python3 "$HERE/host/boardguard.py" --part "$PART_ID" --target "ftdi:$SCLINK_FTDI" "$@")" || exit 4
-    echo "$GUARD"
-    case "$GUARD" in *"an FK33"*) ;; *) die "SCLINK_FTDI drives the SQRL FK33 only; use the Vivado path for this card" ;; esac
-    python3 "$HERE/host/fk33set.py" --check "$@" || exit 2
-    BIT="${SCVOLT_BIT:-$HERE/rtl/vrmbridge_fk33.bit}"
-    [ -f "$BIT" ] || die "bitstream not found: $BIT (build it: cd rtl && BOARD=fk33 vivado -mode batch -source build.tcl)"
-    python3 "$HERE/host/ftdijtag.py" --serial "$SCLINK_FTDI" --load "$BIT" || die "loading the bridge failed"
-    exec python3 "$HERE/host/fk33set.py" "$@"
-fi
-
-[ -x "$VIVADO" ] || die "vivado not found at $VIVADO"
+FTDI="${SCLINK_FTDI:-}"
 SERIAL="${SCLINK_SERIAL:-}"
 XVC="${SCLINK_XVC:-}"
+if [ -n "$FTDI" ]; then
+    [ -z "$XVC" ] || die "SCLINK_FTDI and SCLINK_XVC both set; pick one"
+else
+    [ -x "$VIVADO" ] || die "vivado not found at $VIVADO (or set SCLINK_FTDI=<cable serial> to run without it)"
+fi
 tcl="$(mktemp -t scvolt-load-XXXXXX.tcl)"
 log="$(mktemp -t scvolt-load-XXXXXX.log)"
 trap 'rm -f "$tcl" "$log"' EXIT
@@ -131,14 +121,22 @@ fi
 
 # --- 1. identify the card, read-only, and validate the request for it: no
 #        bitstream is loaded if the request is bad
-{ open_target_tcl; echo "close_hw_target"; } > "$tcl"
 echo "identifying the card ..."
-"$VIVADO" -mode batch -nojournal -nolog -source "$tcl" > "$log" 2>&1 || true
-PART_ID="$(sed -n 's/^PART //p' "$log" | head -1)"
-TARGET_ID="$(sed -n 's/^TARGET //p' "$log" | head -1)"
-if [ -z "$PART_ID" ]; then
-    echo "--- vivado ---" >&2; tail -20 "$log" >&2
-    die "could not read the device's part over JTAG"
+if [ -n "$FTDI" ]; then
+    ID="$(python3 "$HERE/host/ftdijtag.py" --serial "$FTDI" --idcode)" || die "could not read the IDCODE over FTDI $FTDI"
+    echo "  $ID"
+    PART_ID="$(sed -n 's/.*PART \([^ ]*\).*/\1/p' <<<"$ID")"
+    TARGET_ID="ftdi:$FTDI"
+    [ -n "$PART_ID" ] || die "could not read the device's part over FTDI $FTDI"
+else
+    { open_target_tcl; echo "close_hw_target"; } > "$tcl"
+    "$VIVADO" -mode batch -nojournal -nolog -source "$tcl" > "$log" 2>&1 || true
+    PART_ID="$(sed -n 's/^PART //p' "$log" | head -1)"
+    TARGET_ID="$(sed -n 's/^TARGET //p' "$log" | head -1)"
+    if [ -z "$PART_ID" ]; then
+        echo "--- vivado ---" >&2; tail -20 "$log" >&2
+        die "could not read the device's part over JTAG"
+    fi
 fi
 case "$PART_ID" in
     *u55n*|*u55c*) FAMILY=sc ;;
@@ -164,6 +162,12 @@ if [ "$FAMILY" = vrm ]; then
     esac
 else
     case "$*" in *--survey*) die "--survey is for the TH53/TH55's PMBus; this card has a satellite controller" ;; esac
+    # On a bare cable the IDCODE is shared with cards that have no bridge here
+    # (U50, U280); the cable's product string has to name this one.
+    if [ -n "$FTDI" ]; then
+        GUARD="$(python3 "$HERE/host/boardguard.py" --part "$PART_ID" --target "$TARGET_ID")" || exit 4
+        echo "$GUARD"
+    fi
     case "$*" in
         *--enable-menu*)
             case "$*" in
@@ -217,8 +221,9 @@ fi
 # --- 4. load the bridge bitstream
 #
 # The bridge is per part: a C1100 image will not load on a U55C and vice versa,
-# so the Tcl reads PART off the device again and picks the matching file, and
-# refuses a part it does not know rather than guessing.
+# so it is picked from the part (the Tcl reads PART off the device again), and
+# a part it does not know is refused rather than guessed. ftdijtag also checks
+# the part named in the .bit header against the device.
 [ -z "$BIT" ] || [ -f "$BIT" ] || die "bitstream not found: $BIT"
 # Prebuilt bridges ship xz-compressed in rtl/prebuilt/ (~50 KB against 28-85 MB
 # raw); unpack any that has not been built or unpacked locally yet.
@@ -227,10 +232,26 @@ for xzf in "$HERE"/rtl/prebuilt/*bridge_*.bit.xz; do
     raw="$HERE/rtl/$(basename "${xzf%.xz}")"
     [ -f "$raw" ] || { echo "unpacking $(basename "$xzf")"; xz -dc "$xzf" > "$raw"; }
 done
-# Vivado must source a FILE. `-source /dev/stdin` with a heredoc silently does
-# nothing: vivado reads stdin itself, runs no script, and exits in three
-# seconds -- which looked exactly like a successful load and cost a bring-up.
-{ open_target_tcl; cat <<TCL
+if [ -n "$FTDI" ]; then
+    if [ -z "$BIT" ]; then
+        case "${PART_ID,,}" in
+            *u55c*)      BIT="$HERE/rtl/scbridge_u55c.bit" ;;
+            *u55n*)      BIT="$HERE/rtl/scbridge_c1100.bit" ;;
+            *vu33p_civ*) BIT="$HERE/rtl/vrmbridge_th53.bit" ;;
+            *vu33p*)     [ "$FAMILY" = fk33 ] || die "a plain xcvu33p that the guard did not accept as an FK33"
+                         BIT="$HERE/rtl/vrmbridge_fk33.bit" ;;
+            *vu35p*)     BIT="$HERE/rtl/vrmbridge_th55.bit" ;;
+            *)           die "unsupported part $PART_ID -- set SCVOLT_BIT to a bridge built for it" ;;
+        esac
+    fi
+    [ -f "$BIT" ] || die "bitstream not found: $BIT"
+    echo "loading the bridge ..."
+    python3 "$HERE/host/ftdijtag.py" --serial "$FTDI" --load "$BIT" || die "loading the bridge failed"
+else
+    # Vivado must source a FILE. `-source /dev/stdin` with a heredoc silently does
+    # nothing: vivado reads stdin itself, runs no script, and exits in three
+    # seconds -- which looked exactly like a successful load and cost a bring-up.
+    { open_target_tcl; cat <<TCL
 set bit {$BIT}
 if {\$bit eq ""} {
     switch -glob -- [string tolower \$part] {
@@ -251,17 +272,18 @@ program_hw_devices \$d
 puts "PROGRAM_OK"
 close_hw_target
 TCL
-} > "$tcl"
-echo "loading the bridge ..."
-"$VIVADO" -mode batch -nojournal -nolog -source "$tcl" > "$log" 2>&1 || true
-grep -E "^(PART|BIT) " "$log" | sed 's/^/  /' || true
-if ! grep -q PROGRAM_OK "$log"; then
-    echo "--- vivado ---" >&2; tail -20 "$log" >&2
-    die "programming failed (no PROGRAM_OK)"
+    } > "$tcl"
+    echo "loading the bridge ..."
+    "$VIVADO" -mode batch -nojournal -nolog -source "$tcl" > "$log" 2>&1 || true
+    grep -E "^(PART|BIT) " "$log" | sed 's/^/  /' || true
+    if ! grep -q PROGRAM_OK "$log"; then
+        echo "--- vivado ---" >&2; tail -20 "$log" >&2
+        die "programming failed (no PROGRAM_OK)"
+    fi
+    grep -qi "End of startup status: HIGH" "$log" \
+        && echo "loaded (End of startup status: HIGH)." \
+        || echo "loaded (vivado reported no startup status -- verify before trusting it)."
 fi
-grep -qi "End of startup status: HIGH" "$log" \
-    && echo "loaded (End of startup status: HIGH)." \
-    || echo "loaded (vivado reported no startup status -- verify before trusting it)."
 
 # --- 5. speak to the satellite controller, or to the regulator
 if [ "$FAMILY" = fk33 ]; then

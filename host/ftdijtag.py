@@ -11,6 +11,17 @@ standard library only), and offers the same face as sclink.ScLink: `part`,
 register, and can load a full bitstream (the bridge) with the standard JTAG
 configuration sequence: JPROGRAM, wait for INIT, CFG_IN, JSTART, then DONE.
 
+Multi-SLR dies (the C1100 / U55N's two SLRs, the U55C's three) concatenate one
+6-bit IR per SLR. The instruction rides in the top field and every lower SLR
+gets 0x24 -- the rule sclink.ir() applies through Vivado -- except BYPASS, which
+is all ones across the full width. The IR length is measured on the chain and
+must agree with the part table, or nothing is shifted.
+
+TCK is clocked with zero-data byte shifts, not MPSSE's clock-only command: on
+the FT4232H that the Alveo and TUL cards carry, the clock-only command does
+not toggle TCK. DONE is read from the configuration STAT register (CFG_OUT),
+which every SLR count reports the same way.
+
 Pins are the usual MPSSE JTAG mapping (ADBUS0 TCK, 1 TDI, 2 TDO, 3 TMS), and
 ADBUS5-7 are driven high as SQRL's and AMD's cards expect of their JTAG FTDI.
 TCK is 6 MHz.
@@ -26,6 +37,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import sclink  # noqa: E402
 
 VID = 0x0403
 PIDS = (0x6010, 0x6011)          # FT2232H, FT4232H
@@ -33,12 +45,13 @@ INTERFACE_A = 1
 BITMODE_RESET, BITMODE_MPSSE = 0x00, 0x02
 TCK_DIV = 4                      # 60 MHz / (2 * (4 + 1)) = 6 MHz
 
-OP_NOP, OP_SYSMON = 0x00, 0x01
-
-# UltraScale+ 6-bit JTAG instructions (UG570).
-IR_CFG_IN, IR_JPROGRAM, IR_JSTART, IR_ISC_NOOP = 0x05, 0x0B, 0x0C, 0x14
+# UltraScale+ 6-bit JTAG instructions (UG570), per SLR.
+IR_CFG_OUT, IR_CFG_IN, IR_JPROGRAM, IR_JSTART, IR_ISC_NOOP = 0x04, 0x05, 0x0B, 0x0C, 0x14
+IR_USER1, IR_BYPASS = 0x02, 0x3F
+IR_FILLER = 0x24               # what every lower SLR's field carries
 IR_DONE_BIT = 0x20             # the IR capture value: bit 5 is DONE
 IR_INIT_BIT = 0x10             # bit 4 is INIT_COMPLETE
+STAT_DONE, STAT_EOS, STAT_CRC_ERR = 1 << 14, 1 << 4, 1 << 0
 
 REV8 = bytes(int(f"{i:08b}"[::-1], 2) for i in range(256))
 
@@ -61,18 +74,34 @@ def bit_payload(path):
         p += n
     raise FtdiError(f"{path}: no configuration payload")
 
-# IDCODE (version nibble masked) -> the part string Vivado would report, for
-# the dies this tool knows. The 6-bit-per-SLR IR rule is the same as sclink's.
+# IDCODE (version nibble masked) -> the part string Vivado would report, the
+# IR length (6 bits per SLR), and the part prefixes a .bit header may name for
+# it. One IDCODE can be several dies (xcu50 / xcu55n, xcu280 / xcu55c); the
+# board guard tells those apart by the cable, not this table.
 PARTS = {
-    0x04B69093: ("xcvu33p", 6),
-    0x04B6D093: ("xcvu33p_CIV", 6),
-    0x04B71093: ("xcvu35p", 12),
-    0x04B77093: ("xcu50_u55n", 12),
+    0x04B69093: ("xcvu33p", 6, ("xcvu33p-",)),
+    0x04B6D093: ("xcvu33p_CIV", 6, ("xcvu33p_civ-",)),
+    0x04B71093: ("xcvu35p", 12, ("xcvu35p-",)),
+    0x04B77093: ("xcu50_u55n", 12, ("xcu55n-", "xcu50-")),
+    0x04B7D093: ("xcu280_u55c", 18, ("xcu55c-", "xcu280-")),
 }
 
 
+def ir_word(op, ir_len):
+    """A 6-bit instruction widened to an ir_len-bit chain (sclink.ir()'s rule)."""
+    slrs = max(1, ir_len // 6)
+    if op == IR_BYPASS:
+        return (1 << (6 * slrs)) - 1
+    v = op << (6 * (slrs - 1))
+    for i in range(slrs - 1):
+        v |= IR_FILLER << (6 * i)
+    return v
+
+
 def _lib():
-    name = ctypes.util.find_library("ftdi1") or "libftdi1.so.2"
+    # UPVC_LIBFTDI names the library outright (a libftdi1.dll on Windows).
+    name = (os.environ.get("UPVC_LIBFTDI") or ctypes.util.find_library("ftdi1")
+            or "libftdi1.so.2")
     try:
         lib = ctypes.CDLL(name)
     except OSError as e:
@@ -91,7 +120,7 @@ class FtdiError(RuntimeError):
     pass
 
 
-class FtdiLink:
+class FtdiLink(sclink.BridgeOps):
     """sclink.ScLink's interface, over MPSSE."""
 
     def __init__(self, serial=None):
@@ -103,6 +132,7 @@ class FtdiLink:
         self.part = ""
         self.ir_len = 6
         self.idcode = None
+        self.bit_parts = ()
 
     # ---- the cable ----------------------------------------------------------
     def _chk(self, rc, what):
@@ -145,7 +175,11 @@ class FtdiLink:
         part = PARTS.get(self.idcode & 0x0FFFFFFF)
         if part is None:
             raise FtdiError(f"IDCODE 0x{self.idcode:08x} is not a die this tool knows")
-        self.part, self.ir_len = part
+        self.part, self.ir_len, self.bit_parts = part
+        measured = self._measure_ir_len()
+        if measured != self.ir_len:
+            raise FtdiError(f"IDCODE 0x{self.idcode:08x} is {self.part} (IR {self.ir_len}), but the "
+                            f"chain measures IR {measured}: more than one device, or a bad cable")
         return self
 
     def close(self):
@@ -232,44 +266,47 @@ class FtdiLink:
         self._tms(1, 0b0)
         return self._shift(0, 32)            # IDCODE is the DR after Test-Logic-Reset
 
+    def _measure_ir_len(self):
+        """Flush the IR with zeros, then feed ones and count to the first one out.
+        Needs no part table; leaves the TAP in Run-Test/Idle with nothing loaded."""
+        self._tms(5, 0b11111)
+        self._tms(5, 0b00110)                          # TLR -> RTI -> Select-DR -> Select-IR -> Capture -> Shift-IR
+        self._write(bytes([0x19, 7, 0]) + bytes(8))    # 64 zeros
+        n = None
+        for i in range(64):
+            self._write(bytes([0x3B, 0, 0x01, 0x87]))  # one 1 in, one bit out
+            if (self._read(1)[0] >> 7) & 1:
+                n = i
+                break
+        self._tms(5, 0b11111)                          # -> Test-Logic-Reset; nothing was updated
+        self._tms(1, 0b0)
+        if n is None:
+            raise FtdiError("could not measure the IR length (TDO never echoed a one)")
+        return n
+
+    def _ir(self, op, read=False):
+        return self._shift(ir_word(op, self.ir_len), self.ir_len, ir=True, read=read)
+
     def _user1(self):
-        """USER1 for this IR length: 0x02 per SLR's 6 bits, BYPASS (all ones)
-        elsewhere -- sclink.ir()'s rule, for the one-SLR dies this serves."""
-        if self.ir_len != 6:
-            raise FtdiError(f"IR length {self.ir_len}: only one-SLR dies are supported here")
-        return 0x02
+        return ir_word(IR_USER1, self.ir_len)
 
     # ---- configuration -------------------------------------------------------
     def _ir_capture(self, op=IR_ISC_NOOP):
-        return self._shift(op, self.ir_len, ir=True)
+        """The status the IR captures (bit 4 INIT_COMPLETE, bit 5 DONE) of the
+        SLR nearest TDO."""
+        return self._ir(op, read=True) & 0x3F
 
     def _idle(self, cycles):
-        while cycles > 0:
-            n = min(cycles, 65536 * 8)
-            nb = max(1, n // 8)
-            self._write(bytes([0x8F, (nb - 1) & 0xFF, (nb - 1) >> 8]))      # clock nb*8 TCKs, no data
-            cycles -= nb * 8
+        """Clock TCK in Run-Test/Idle by shifting zero bytes (see the module note)."""
+        nb = max(1, (cycles + 7) // 8)
+        while nb > 0:
+            n = min(nb, 65536)
+            self._write(bytes([0x19, (n - 1) & 0xFF, (n - 1) >> 8]) + bytes(n))
+            nb -= n
 
-    def load_bit(self, path, log=print):
-        """Configure the FPGA with a full bitstream. Raises unless DONE goes high."""
-        payload, part = bit_payload(path)
-        if part and not part.lower().startswith(self.part.lower().split("_")[0]):
-            raise FtdiError(f"{path} is built for {part}, the device is {self.part}")
-        if self.ir_len != 6:
-            raise FtdiError("loading is implemented for one-SLR dies only")
-        log(f"loading {os.path.basename(path)} ({len(payload)} bytes, part {part or '?'}) ...")
-        self._shift(IR_JPROGRAM, 6, ir=True, read=False)
-        t0 = time.monotonic()
-        while True:                                    # INIT_COMPLETE after the clear
-            time.sleep(0.01)
-            if self._ir_capture() & IR_INIT_BIT:
-                break
-            if time.monotonic() - t0 > 2.0:
-                raise FtdiError("INIT_COMPLETE never rose after JPROGRAM")
-        self._idle(10000)
-        self._shift(IR_CFG_IN, 6, ir=True, read=False)
-        self._tms(3, 0b001)                            # Run-Test/Idle -> Shift-DR
-        data = payload.translate(REV8)                 # config words go MSB first; MPSSE shifts LSB first
+    def _shift_dr_bytes(self, data):
+        """Run-Test/Idle -> Shift-DR, all of data LSB first, -> Run-Test/Idle."""
+        self._tms(3, 0b001)
         body, last = data[:-1], data[-1]
         for off in range(0, len(body), 32768):
             chunk = body[off:off + 32768]
@@ -277,14 +314,63 @@ class FtdiLink:
         self._write(bytes([0x1B, 6, last & 0x7F]))     # 7 bits, then the 8th with TMS -> Exit1-DR
         self._write(bytes([0x4B, 0, 0x01 | ((last >> 7) & 1) << 7]))
         self._tms(2, 0b01)                             # Update-DR, Run-Test/Idle
-        self._shift(IR_JSTART, 6, ir=True, read=False)
-        self._idle(2000)
-        cap = self._ir_capture()
+
+    def read_stat(self):
+        """The configuration STAT register (type-1 read of reg 7 over CFG_IN /
+        CFG_OUT). Non-destructive."""
         self._tms(5, 0b11111)
         self._tms(1, 0b0)
-        if not cap & IR_DONE_BIT:
-            raise FtdiError(f"DONE did not go high (IR capture 0x{cap:02x})")
-        log(f"loaded (DONE high, IR capture 0x{cap:02x}, {time.monotonic() - t0:.1f} s)")
+        self._ir(IR_CFG_IN)
+        words = (0xFFFFFFFF, 0xAA995566, 0x20000000, 0x2800E001, 0x20000000, 0x20000000)
+        self._shift_dr_bytes(b"".join(w.to_bytes(4, "big") for w in words).translate(REV8))
+        self._ir(IR_CFG_OUT)
+        raw = self._shift(0, 32).to_bytes(4, "little").translate(REV8)
+        return int.from_bytes(raw, "big")
+
+    def _configure(self, payload):
+        self._tms(5, 0b11111)
+        self._tms(1, 0b0)
+        self._ir(IR_JPROGRAM)
+        self._ir(IR_ISC_NOOP)
+        t0 = time.monotonic()
+        while True:                                    # INIT_COMPLETE after the clear, TCK running
+            self._idle(80000)
+            if self._ir_capture() & IR_INIT_BIT:
+                break
+            if time.monotonic() - t0 > 3.0:
+                raise FtdiError("INIT_COMPLETE never rose after JPROGRAM")
+        self._idle(300000)
+        self._ir(IR_ISC_NOOP)
+        self._ir(IR_CFG_IN)
+        self._idle(10000)
+        self._shift_dr_bytes(payload.translate(REV8))  # config words go MSB first; MPSSE shifts LSB first
+        self._idle(200000)                             # the startup sequence runs on these
+        self._ir(IR_JSTART)
+        self._idle(4000)
+        self._tms(5, 0b11111)
+        self._tms(1, 0b0)
+        return self.read_stat()
+
+    def load_bit(self, path, log=print):
+        """Configure the FPGA with a full bitstream. Raises unless STAT shows
+        DONE with no CRC error; one retry, as a cold card's first load can be
+        lost to a flash boot the config engine is still retrying."""
+        payload, part = bit_payload(path)
+        if part and not part.lower().startswith(self.bit_parts):
+            raise FtdiError(f"{path} is built for {part}, the device is {self.part}")
+        log(f"loading {os.path.basename(path)} ({len(payload)} bytes, part {part or '?'}, "
+            f"IR {self.ir_len}) ...")
+        t0 = time.monotonic()
+        for attempt in (1, 2):
+            st = self._configure(payload)
+            if st & STAT_DONE and not st & STAT_CRC_ERR:
+                break
+            log(f"  attempt {attempt}: STAT 0x{st:08x} (DONE {int(bool(st & STAT_DONE))}, "
+                f"CRC_ERR {st & STAT_CRC_ERR})")
+        else:
+            raise FtdiError(f"configuration did not complete (STAT 0x{st:08x})")
+        log(f"loaded (STAT 0x{st:08x}: DONE, EOS {int(bool(st & STAT_EOS))}, "
+            f"{time.monotonic() - t0:.1f} s)")
 
     # ---- the bridge register (sclink.ScLink's face) -------------------------
     def exchange(self, op, arg=0):
@@ -292,27 +378,11 @@ class FtdiLink:
         self._shift(self._user1(), self.ir_len, ir=True, read=False)
         return self._shift(word, 64)
 
-    def ask(self, op, arg=0):
-        self.exchange(op, arg)
-        return self.exchange(OP_NOP)
-
-    def sysmon(self):
-        r = self.ask(OP_SYSMON)
-        if not r:
-            return None
-        temp, vccint, vccaux = r & 0xFFFF, (r >> 16) & 0xFFFF, (r >> 32) & 0xFFFF
-        vccbram = (r >> 48) & 0xFFFF
-        return {"temp_c": temp * 509.3140064 / 65536 - 280.23,
-                "vccint_mv": round(vccint * 3000.0 / 65536),
-                "vccaux_mv": round(vccaux * 3000.0 / 65536),
-                "vccbram_mv": round(vccbram * 3000.0 / 65536) if vccbram else None}
-
 
 def link():
     """The link this run should use: FtdiLink with SCLINK_FTDI set, else Vivado's."""
     if os.environ.get("SCLINK_FTDI", "").strip():
         return FtdiLink()
-    import sclink
     return sclink.ScLink()
 
 
@@ -321,13 +391,18 @@ def main(argv=None):
     ap.add_argument("--serial", default=None)
     ap.add_argument("--idcode", action="store_true")
     ap.add_argument("--load", default=None, help="configure the FPGA with this .bit")
+    ap.add_argument("--stat", action="store_true", help="read the configuration STAT register")
     a = ap.parse_args(argv)
     try:
         with FtdiLink(a.serial) as l:
             print(f"IDCODE 0x{l.idcode:08x}  PART {l.part}  IR {l.ir_len}")
             if a.load:
                 l.load_bit(a.load)
-    except FtdiError as e:
+            if a.stat:
+                st = l.read_stat()
+                print(f"STAT 0x{st:08x}  DONE {int(bool(st & STAT_DONE))}  "
+                      f"EOS {int(bool(st & STAT_EOS))}  CRC_ERR {st & STAT_CRC_ERR}")
+    except (FtdiError, RuntimeError) as e:
         print(f"ftdijtag: {e}", file=sys.stderr)
         return 3
     return 0

@@ -495,13 +495,13 @@ def main(argv=None):
         return check(a)
 
     import boardguard
-    import sclink
+    import ftdijtag
     xvc = os.environ.get("SCLINK_XVC", "").strip()
     try:
         # Before Vivado opens anything: is the XVC far end an Osprey E3xx box?
         if xvc:
             boardguard.check_xvc(xvc)
-        with sclink.ScLink() as link:
+        with ftdijtag.link() as link:
             # Before any PMBus traffic: is the die a TH53/TH55's?
             boardguard.check_die(link.part, a.board)
             if a.survey:
@@ -511,7 +511,7 @@ def main(argv=None):
     except boardguard.Refused as e:
         print(boardguard.explain(e), file=sys.stderr)
         return 4
-    except BridgeError as e:
+    except (BridgeError, ftdijtag.FtdiError) as e:
         print("ERROR:", e, file=sys.stderr)
         return 3
 

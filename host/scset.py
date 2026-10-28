@@ -16,6 +16,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ftdijtag  # noqa: E402
 import sclink  # noqa: E402
 import scvolt  # noqa: E402
 
@@ -35,7 +36,7 @@ def main(argv=None):
     ap.add_argument("--settle", type=float, default=2.0)
     a = ap.parse_args(argv)
 
-    with sclink.ScLink() as link:
+    with ftdijtag.link() as link:
         sm = link.sysmon()
         if not sm:
             print("no reply from the bridge — is the bridge bitstream loaded?", file=sys.stderr)
@@ -121,4 +122,8 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except ftdijtag.FtdiError as e:
+        print("ERROR:", e, file=sys.stderr)
+        raise SystemExit(3)
