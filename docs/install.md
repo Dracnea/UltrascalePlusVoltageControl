@@ -10,9 +10,9 @@ the prebuilt bridges ship in every install below and are checked against
 
 | board | status |
 |---|---|
-| SQRL FK33 | hardware-proven without Vivado |
-| Varium C1100 / Alveo U55N | pending hardware test (needs multi-SLR support in `host/ftdijtag.py`) |
-| Alveo U55C | pending hardware test (same) |
+| SQRL FK33 | hardware-proven without Vivado; re-test pending after the multi-SLR loader change |
+| Varium C1100 / Alveo U55N | pending hardware test (2-SLR path in `host/ftdijtag.py`) |
+| Alveo U55C | pending hardware test (3-SLR path in `host/ftdijtag.py`) |
 | TUL TH53, TH55 | pending hardware test |
 
 `upvc` maps part to bridge exactly as `changeVoltage.sh` does and runs the same

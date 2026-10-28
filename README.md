@@ -42,7 +42,8 @@ $ upvc list
 $ upvc set --serial <serial> --vccint min --vccbram min --vccmem min
 ```
 
-Per-board status of this path: the FK33 is hardware-proven; the C1100 / U55N, U55C, TH53 and
+Per-board status of this path: the FK33 was hardware-proven (re-test pending after the multi-SLR
+loader change); the C1100 / U55N, U55C, TH53 and
 TH55 are pending hardware test on the Vivado-free path. See [docs/install.md](docs/install.md)
 for the .deb, pipx, running from a checkout, the udev rule, and Windows notes.
 
