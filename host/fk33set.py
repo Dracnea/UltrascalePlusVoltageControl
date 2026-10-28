@@ -2,7 +2,8 @@
 """Set an SQRL FK33's rails through the vrmbridge bitstream, and prove it.
 
     fk33set.py --show                         read everything, change nothing
-    fk33set.py --vccint min --vccbram min     the lowest the board's resistors allow
+    fk33set.py --vccint min --vccbram min --below-spec
+                                              the lowest the board's resistors allow
     fk33set.py --vccint 800 --vcchbm default  millivolts, `min` or `default`
     fk33set.py --survey [--out f.json]        what answers on the rail bus
     fk33set.py --limits                       the models and limits, no hardware
@@ -53,8 +54,21 @@ MODDED OR STOCK
 
 SAFETY
     - Ceilings are DS923's recommended maxima (VCCINT/VCCBRAM 876 mV, VCC_HBM
-      1236 mV) and are not overridable. Overvolting destroys the part;
-      undervolting only stops the design.
+      1236 mV) and are not overridable. Overvolting destroys the part.
+    - Floors: a target below the lower of DS923's recommended minimum
+      (VCCINT/VCCBRAM 825 mV, VCC_HBM 1164 mV) and the board's own power-on
+      voltage (code 128 on its curve) is refused without --below-spec. The
+      power-on term is there because the board itself ships under DS923 on
+      VCCINT (stock 809 mV, modded 676 mV), and `default` must always be
+      reachable. So `min` on VCCINT is refused on every board, and on VCCBRAM
+      on a modded one. Below the floor the fabric is out of its specified
+      range and the regulators run at the bottom of their feedback range,
+      with no telemetry on this board to show how they cope. Mining runs
+      there routinely; it must be asked for, not reached by default.
+    - Temperatures: before anything is written, the die (SYSMON) and the
+      three board sensors must read below TEMP_MAX_C, and the board sensors
+      must answer at all. Both are read again at every step of a ramp; a step
+      that finds the card too hot puts the rail back where it started.
     - Every move is a ladder of small code steps (at most STEP_MV each), each
       written, read back, and -- on VCCINT and VCCBRAM -- checked against
       SYSMON. A step that SYSMON does not follow puts the rail back where it
@@ -100,6 +114,8 @@ SYSMON_KEY = {"vccint": "vccint_mv", "vccbram": "vccbram_mv"}
 
 # --- limits --------------------------------------------------------------------
 CEILING_MV = {"vccint": 876, "vccbram": 876, "vcchbm": 1236}   # DS923, not overridable
+FLOOR_MV = {"vccint": 825, "vccbram": 825, "vcchbm": 1164}     # DS923 minima; --below-spec passes
+TEMP_MAX_C = 85.0     # die (SYSMON) and board sensors: nothing is written at or above this
 STEP_MV = 10          # largest modelled change per wiper step
 DETECT_MV = 30        # the measurement must sit this close to one curve ...
 DETECT_GAP_MV = 50    # ... and the curves be at least this far apart where it sits
@@ -156,6 +172,33 @@ def parse_target(word, rail, state):
         raise ValueError(f"{rail}: {mv} mV is outside what a {state} board reaches "
                          f"({lo:.0f}..{hi:.0f} mV)")
     return code_for(rail, state, mv), mv
+
+
+def floor_mv(rail, state):
+    """DS923's minimum, or the board's power-on voltage where the board itself ships below it."""
+    return min(FLOOR_MV[rail], volts(rail, state, CODE_POWER_ON))
+
+
+def floor_refusal(rail, state, mv, below_spec):
+    """None, or why mv (the target) is refused: under the floor without --below-spec."""
+    f = floor_mv(rail, state)
+    if below_spec or mv >= f - 0.5:
+        return None
+    return (f"{rail}: {mv:.0f} mV is below the {f:.0f} mV floor (DS923 {FLOOR_MV[rail]} mV, or a "
+            f"{state} board's power-on level if lower); give --below-spec to run the fabric out of spec")
+
+
+def heat_refusal(sm, temps):
+    """None, or why the card is too hot (or its board sensors silent) to touch the rails."""
+    if not temps:
+        return "the board temperature sensors (0x18/0x19/0x1F) do not answer"
+    hot = {"die": sm.get("temp_c")} if sm.get("temp_c") is not None else {}
+    hot.update(temps)
+    hot = {k: v for k, v in hot.items() if v >= TEMP_MAX_C}
+    if hot:
+        return ("too hot: " + ", ".join(f"{k} {v:.1f} C" for k, v in hot.items())
+                + f" (limit {TEMP_MAX_C:.0f} C)")
+    return None
 
 
 # --- the bus -------------------------------------------------------------------
@@ -234,6 +277,10 @@ def ramp(board, link, rail, state, start, goal, offset, base, log, sleep):
         if sm is None:
             board.set_code(rail, start)
             raise BusError("SYSMON stopped answering mid-ramp; rail put back")
+        why = heat_refusal(sm, board.temps())
+        if why:
+            board.set_code(rail, start)
+            raise BusError(f"{rail}: {why} at code {nxt}; put back to code {start}")
         pred = volts(rail, state, nxt) + offset
         if rail in SYSMON_KEY:
             got = sm[SYSMON_KEY[rail]]
@@ -313,6 +360,10 @@ def run(link, a, sleep=time.sleep, out=print):
         f"({hbm_state} -- not measurable on the die; {'declared' if a.hbm_mod else 'assumed, the safe side'})")
     if a.show or not any(req.values()):
         return 0
+    why = heat_refusal(sm, t)
+    if why:
+        err(f"REFUSED: {why}. Nothing was written.")
+        return 2
 
     plan = {}
     for r in RAILS:
@@ -331,6 +382,10 @@ def run(link, a, sleep=time.sleep, out=print):
             err(f"REFUSED: {r} at code {code} would be "
                 f"{volts(r, state[r], code) + offset[r]:.0f} mV, above {CEILING_MV[r]} mV")
             return 2
+        why = floor_refusal(r, state[r], want, a.below_spec)
+        if why:
+            err(f"REFUSED: {why}. Nothing was written.")
+            return 2
         plan[r] = (code, want)
     for r, (code, want) in plan.items():
         out(f"{r.upper()}: code {codes[r]} -> {code}  (~{want:.0f} mV on a {state[r]} board)")
@@ -344,7 +399,10 @@ def run(link, a, sleep=time.sleep, out=print):
     after = sysmon(link, 12)
     rc = 0
     out(f"SYSMON after: VCCINT {after['vccint_mv']:.0f} mV, VCCBRAM {after['vccbram_mv']:.0f} mV, "
-        f"VCCAUX {after['vccaux_mv']:.0f} mV")
+        f"VCCAUX {after['vccaux_mv']:.0f} mV, die {after['temp_c']:.1f} C")
+    t = board.temps()
+    if t:
+        out("board sensors after: " + ", ".join(f"{k} {v:.1f} C" for k, v in t.items()))
     for r, (code, want) in plan.items():
         if r in SYSMON_KEY:
             got = after[SYSMON_KEY[r]]
@@ -393,7 +451,7 @@ class FakeLink:
     """The vrmbridge register over a fake FK33 bus: three pots, three sensors."""
 
     def __init__(self, modded=False, hbm_swapped=False, codes=None, offset=3.0,
-                 hbm_moves_int=False, lag=False):
+                 hbm_moves_int=False, lag=False, board_c=40.0, no_sensors=False, heat_after=None):
         self.part = "xcvu33p"
         self.codes = {(a, w): CODE_POWER_ON for a in (0x2C, 0x2D, 0x2E) for w in (0, 1)}
         for r, c in (codes or {}).items():
@@ -401,6 +459,7 @@ class FakeLink:
         self.st = {"vccint": "modded" if modded else "stock", "vccbram": "modded" if modded else "stock",
                    "vcchbm": "modded" if hbm_swapped else "stock"}
         self.offset, self.hbm_moves_int, self.lag = offset, hbm_moves_int, lag
+        self.board_c, self.no_sensors, self.heat_after = board_c, no_sensors, heat_after
         self.result, self.writes = 0, []
 
     def _v(self, rail):
@@ -434,9 +493,13 @@ class FakeLink:
                     rack = True
                     self.codes[(addr, w)] = ((reg & 1) << 8) | (data & 0xFF)
                     self.writes.append((addr, w, self.codes[(addr, w)]))
-            elif addr in TEMP_SENSORS:
+            elif addr in TEMP_SENSORS and not self.no_sensors:
                 ack = rack = mode == V.M_RWORD
-                d = 0x86C2 if reg == 0x05 else 0
+                c = self.board_c
+                if self.heat_after is not None and len(self.writes) >= self.heat_after:
+                    c = TEMP_MAX_C + 5
+                raw = int(round(c * 16)) & 0x0FFF
+                d = ((raw & 0xFF) << 8) | (raw >> 8) if reg == 0x05 else 0
             self.result = ((V.BRIDGE_ID << 48) | (1 << 20) | (int(rack) << 18) | (int(rack) << 17)
                            | (int(ack) << 16) | d)
         return prev
@@ -450,7 +513,7 @@ def selftest():
     def case(what, link, want_rc, **kw):
         nonlocal fails
         a = argparse.Namespace(fk33_mod=None, hbm_mod=None, show=False, settle=0,
-                               vccint=None, vccbram=None, vcchbm=None)
+                               vccint=None, vccbram=None, vcchbm=None, below_spec=False)
         vars(a).update(kw)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
@@ -475,18 +538,20 @@ def selftest():
 
     l, _ = case("stock board, show writes nothing", FakeLink(), 0, show=True)
     fails += bool(l.writes)
-    l, o = case("stock board: vccint/vccbram/vcchbm min", FakeLink(), 0, vccint="min", vccbram="min", vcchbm="min")
+    l, o = case("stock board: vccint/vccbram/vcchbm min", FakeLink(), 0, vccint="min", vccbram="min", vcchbm="min",
+                below_spec=True)
     ok = all(l.codes[POT[r]] == 256 for r in RAILS) and "CONFIRMED" in o
     fails += not ok
     print(f"{'PASS' if ok else 'FAIL'} all three at code 256, confirmed on-die")
-    case("modded board detected and set to 650", FakeLink(modded=True), 0, vccint="650")
+    case("modded board detected and set to 650", FakeLink(modded=True), 0, vccint="650", below_spec=True)
     case("--fk33-mod stock on a modded board refused", FakeLink(modded=True), 2, fk33_mod="stock", vccint="min")
     case("--fk33-mod modded on a stock board refused", FakeLink(), 2, fk33_mod="modded", vccint="min")
     case("stock board refuses 700 mV (below its reach)", FakeLink(), 2, vccint="700")
     case("ceiling refused (900 on a stock board)", FakeLink(), 2, vccint="900")
-    l, _ = case("low BRAM code steps to 128 to detect", FakeLink(codes={"vccbram": 10}), 0, vccbram="min")
+    l, _ = case("low BRAM code steps to 128 to detect", FakeLink(codes={"vccbram": 10}), 0, vccbram="min",
+                below_spec=True)
     fails += l.codes[POT["vccbram"]] != 256
-    l, _ = case("SYSMON not following -> abort and restore", FakeLink(lag=True), 1, vccint="min")
+    l, _ = case("SYSMON not following -> abort and restore", FakeLink(lag=True), 1, vccint="min", below_spec=True)
     ok = l.codes[POT["vccint"]] == CODE_POWER_ON
     fails += not ok
     print(f"{'PASS' if ok else 'FAIL'} VCCINT put back to code 128")
@@ -496,6 +561,31 @@ def selftest():
     print(f"{'PASS' if ok else 'FAIL'} VCCHBM put back to code 128")
     l, _ = case("default returns to code 128", FakeLink(codes={"vccint": 256}), 0, vccint="default")
     fails += l.codes[POT["vccint"]] != 128
+    # floors
+    l, _ = case("min below DS923 floor refused without --below-spec", FakeLink(), 2, vccint="min")
+    fails += bool(l.writes)
+    l, _ = case("modded VCCBRAM min (~701 mV) refused without --below-spec", FakeLink(modded=True), 2,
+                vccbram="min")
+    fails += bool(l.writes)
+    case("stock VCCBRAM min (~825 mV, at DS923's minimum) allowed", FakeLink(), 0, vccbram="min")
+    case("800 mV VCCINT refused on a stock board (power-on 809)", FakeLink(), 2, vccint="800")
+    case("815 mV VCCINT allowed on a stock board", FakeLink(), 0, vccint="815")
+    case("modded VCCINT 700 allowed (its power-on is 676)", FakeLink(modded=True), 0, vccint="700")
+    case("modded VCCINT 650 refused without --below-spec", FakeLink(modded=True), 2, vccint="650")
+    case("VCCHBM min on a stock board (1164 mV) is in spec", FakeLink(), 0, vcchbm="min")
+    case("VCCHBM min on a swapped board (~1029 mV) refused", FakeLink(hbm_swapped=True), 2, vcchbm="min",
+         hbm_mod="swapped")
+    # temperatures
+    l, _ = case("hot board refused before any write", FakeLink(board_c=TEMP_MAX_C + 1), 2, vccint="830")
+    fails += bool(l.writes)
+    l, _ = case("silent board sensors refused", FakeLink(no_sensors=True), 2, vccint="830")
+    fails += bool(l.writes)
+    case("hot board still allows --show", FakeLink(board_c=TEMP_MAX_C + 1), 0, show=True)
+    l, _ = case("card heats mid-ramp -> abort and restore", FakeLink(heat_after=2), 1, vccint="min",
+                below_spec=True)
+    ok = l.codes[POT["vccint"]] == CODE_POWER_ON
+    fails += not ok
+    print(f"{'PASS' if ok else 'FAIL'} VCCINT put back to code 128 after the heat abort")
     print(f"== {fails} failure(s)")
     return 1 if fails else 0
 
@@ -504,11 +594,13 @@ def describe():
     print("SQRL FK33 (vrmbridge on the PMIC I2C, BB24/BA24): digital pots, code 0..256, higher = lower")
     for r in RAILS:
         addr, w = POT[r]
-        print(f"  {r.upper():7s} pot 0x{addr:02x} wiper {w}, ceiling {CEILING_MV[r]} mV")
+        print(f"  {r.upper():7s} pot 0x{addr:02x} wiper {w}, ceiling {CEILING_MV[r]} mV, "
+              f"floor {FLOOR_MV[r]} mV or the board's power-on level if lower (--below-spec passes it)")
         for s in ("stock", "modded"):
             print(f"    {s:6s} {volts(r, s, 256):6.1f} (min) .. {volts(r, s, CODE_POWER_ON):6.1f} (power-on, "
                   f"default) .. {volts(r, s, 0):6.1f} mV (code 0)")
     print("  mod state: measured on VCCINT/VCCBRAM; VCCHBM assumed stock unless --hbm-mod swapped")
+    print(f"  temperature: nothing is written with the die or a board sensor at {TEMP_MAX_C:.0f} C or above")
 
 
 def check(a):
@@ -535,7 +627,13 @@ def check(a):
         oks = []
         for s in ("stock", "modded"):
             try:
-                parse_target(w, r, s)
+                code, mv = parse_target(w, r, s)
+                # Offline there is no measured offset (a few mV, calibrated on the card): give a
+                # modelled target FOLLOW_MV of slack here; run() judges it exactly.
+                why = floor_refusal(r, s, mv if mv is not None else volts(r, s, code) + FOLLOW_MV,
+                                    a.below_spec)
+                if why:
+                    raise ValueError(why)
                 oks.append(s)
             except ValueError as e:
                 last = e
@@ -555,6 +653,8 @@ def main(argv=None):
     ap.add_argument("--vcchbm", "--vccmem", dest="vcchbm", default=None, help="mV | min | default")
     ap.add_argument("--fk33-mod", default=None, help="stock | modded: cross-check the measurement")
     ap.add_argument("--hbm-mod", default=None, help="stock | swapped (R84/R57); default stock")
+    ap.add_argument("--below-spec", action="store_true",
+                    help="allow targets under DS923's minima (VCCINT/VCCBRAM 825, VCC_HBM 1164 mV)")
     ap.add_argument("--show", action="store_true")
     ap.add_argument("--survey", action="store_true")
     ap.add_argument("--out", default=None)
