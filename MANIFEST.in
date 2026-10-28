@@ -1,0 +1,6 @@
+include LICENSE README.md
+include host/*.py
+include rtl/prebuilt/*.bit.xz rtl/prebuilt/SHA256SUMS
+include boards/u55c/*.bit.xz
+recursive-include docs *.md
+recursive-include packaging *.py *.rules *.sh *.md

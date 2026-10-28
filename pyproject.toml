@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "upvc"
+version = "0.1.0"
+description = "Set the core, BRAM and memory rails of UltraScale+ FPGA cards over an FTDI cable, with no Vivado"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { file = "LICENSE" }
+dependencies = []          # stdlib only; libftdi1 is a system library loaded with ctypes
+
+[project.scripts]
+upvc = "upvc.cli:main"
+
+[tool.setuptools]
+package-dir = { "" = "packaging/python" }
+packages = ["upvc"]
+# host/*.py, rtl/prebuilt/* and boards/u55c/*.bit.xz are copied into the wheel
+# by the build_py hook in setup.py (they stay where they are in the repo).
