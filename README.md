@@ -42,6 +42,14 @@ $ upvc list
 $ upvc set --serial <serial> --vccint min --vccbram min --vccmem min
 ```
 
+From a checkout, `changeVoltage.sh` picks its link by itself (`SCVOLT_LINK=auto`, the default):
+the card's own FTDI cable when it can be named without guessing (`SCLINK_FTDI`, the cable whose
+serial is `SCLINK_SERIAL`, or the only FTDI cable on the host), otherwise Vivado. Vivado is found
+wherever it is installed, any version: `$VIVADO`, `vivado` on `PATH`, `$XILINX_VIVADO`, then the
+newest under `$XILINX_ROOT`, `~/Xilinx`, `/tools/Xilinx` or `/opt/Xilinx` in either install
+layout (`Vivado/<ver>/bin` up to 2024.2, `<ver>/Vivado/bin` from 2025.1). `SCVOLT_LINK=ftdi`
+refuses to fall back to Vivado; `SCVOLT_LINK=vivado` never touches the cable directly.
+
 Per-board status of this path: the C1100 / U55N and the U55C are hardware-proven; the FK33 was
 proven before the multi-SLR loader change (re-test pending); the TH53 and TH55 are pending hardware
 test on the Vivado-free path. See [docs/install.md](docs/install.md)

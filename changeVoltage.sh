@@ -54,9 +54,42 @@ BIT="${SCVOLT_BIT:-}"          # empty: chosen from the device's part below
 # The card's PCIe address, if it is enumerated. Auto-detected when there is
 # exactly one Xilinx device; set SCVOLT_PCI on a host with several.
 PCI="${SCVOLT_PCI:-$(lspci -Dn -d 10ee: 2>/dev/null | awk 'NR==1{print $1}')}"
-VIVADO="${VIVADO:-$HOME/Xilinx/2026.1/Vivado/bin/vivado}"
-
 die() { echo "changeVoltage: $*" >&2; exit 1; }
+
+# Vivado, wherever it is installed (any version): $VIVADO if set, else `vivado` on PATH, else
+# $XILINX_VIVADO, else the newest under the usual install roots in either layout --
+# <root>/Vivado/<ver>/bin/vivado (2024.2 and older) or <root>/<ver>/Vivado/bin/vivado (2025.1+).
+# Prints nothing when there is none; it is only needed when no FTDI cable is used.
+find_vivado() {
+    if [ -n "${VIVADO:-}" ]; then echo "$VIVADO"; return; fi
+    local v
+    v="$(command -v vivado 2>/dev/null || true)"
+    [ -n "$v" ] && { echo "$v"; return; }
+    [ -n "${XILINX_VIVADO:-}" ] && [ -x "$XILINX_VIVADO/bin/vivado" ] && { echo "$XILINX_VIVADO/bin/vivado"; return; }
+    local r
+    for r in ${XILINX_ROOT:-} "$HOME/Xilinx" "$HOME/xilinx" /tools/Xilinx /opt/Xilinx /opt/xilinx; do
+        [ -d "$r" ] || continue
+        for v in "$r"/Vivado/*/bin/vivado "$r"/*/Vivado/bin/vivado; do
+            [ -x "$v" ] && printf '%s\t%s\n' "$(sed -E 's#.*/([0-9]{4}\.[0-9]+)/.*#\1#' <<<"$v")" "$v"
+        done
+    done | sort -V | tail -1 | cut -f2
+}
+
+# The card's own FTDI cable (Linux sysfs, vendor 0403), when it can be named without guessing:
+# the cable whose USB serial is SCLINK_SERIAL, or the only FTDI cable on the host. The board
+# guard still checks the cable's product string names the card before anything is loaded.
+find_ftdi() {
+    local want="${SCLINK_SERIAL:-}" d s all=()
+    for d in /sys/bus/usb/devices/*; do
+        [ "$(cat "$d/idVendor" 2>/dev/null)" = 0403 ] || continue
+        s="$(cat "$d/serial" 2>/dev/null)" || continue
+        [ -n "$s" ] || continue
+        [ -n "$want" ] && [ "$s" = "$want" ] && { echo "$s"; return; }
+        all+=("$s")
+    done
+    [ -z "$want" ] && [ ${#all[@]} -eq 1 ] && echo "${all[0]}"
+    return 0
+}
 
 limits() {
     python3 "$HERE/host/scvolt.py" --limits; echo; python3 "$HERE/host/vrmset.py" --limits
@@ -78,10 +111,24 @@ esac
 FTDI="${SCLINK_FTDI:-}"
 SERIAL="${SCLINK_SERIAL:-}"
 XVC="${SCLINK_XVC:-}"
+# SCVOLT_LINK picks the path: auto (default) uses the card's FTDI cable directly when it can be
+# named (find_ftdi) and falls back to Vivado; ftdi refuses to fall back; vivado never uses the cable.
+LINK="${SCVOLT_LINK:-auto}"
+case "$LINK" in auto|ftdi|vivado) ;; *) die "SCVOLT_LINK=$LINK: use auto, ftdi or vivado" ;; esac
+if [ -z "$FTDI" ] && [ -z "$XVC" ] && [ "$LINK" != vivado ]; then
+    FTDI="$(find_ftdi)"
+    [ -n "$FTDI" ] && echo "using the card's FTDI cable $FTDI directly (no Vivado; SCVOLT_LINK=vivado to use Vivado)"
+fi
 if [ -n "$FTDI" ]; then
     [ -z "$XVC" ] || die "SCLINK_FTDI and SCLINK_XVC both set; pick one"
+    [ "$LINK" != vivado ] || die "SCLINK_FTDI is set but SCVOLT_LINK=vivado; pick one"
+    export SCLINK_FTDI="$FTDI"        # scset.py / fk33set.py / vrmset.py take the same cable
 else
-    [ -x "$VIVADO" ] || die "vivado not found at $VIVADO (or set SCLINK_FTDI=<cable serial> to run without it)"
+    [ "$LINK" != ftdi ] || die "SCVOLT_LINK=ftdi but no FTDI cable named ${SERIAL:-<none>} (or more than one cable: set SCLINK_FTDI=<serial>)"
+    VIVADO="$(find_vivado)"
+    [ -n "$VIVADO" ] && [ -x "$VIVADO" ] || die "no FTDI cable could be named and no Vivado found (VIVADO=${VIVADO:-<none>}; looked on PATH, \$XILINX_VIVADO, ~/Xilinx, /tools/Xilinx, /opt/Xilinx). Set SCLINK_FTDI=<cable serial> to run without Vivado, or VIVADO=/path/to/vivado"
+    export VIVADO
+    echo "using Vivado $VIVADO"
 fi
 tcl="$(mktemp -t scvolt-load-XXXXXX.tcl)"
 log="$(mktemp -t scvolt-load-XXXXXX.log)"

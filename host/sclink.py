@@ -108,10 +108,36 @@ class BridgeOps:
         return len(out), bytes(out)
 
 
+def find_vivado():
+    """Vivado, any version, wherever installed: $VIVADO, `vivado` on PATH, $XILINX_VIVADO, else
+    the newest under ~/Xilinx, /tools/Xilinx or /opt/Xilinx in either install layout
+    (<root>/Vivado/<ver>/bin/vivado up to 2024.2, <root>/<ver>/Vivado/bin/vivado from 2025.1).
+    Same order as changeVoltage.sh's find_vivado. "vivado" (left to PATH) when there is none."""
+    import glob
+    import re
+    import shutil
+    if os.environ.get("VIVADO"):
+        return os.environ["VIVADO"]
+    on_path = shutil.which("vivado")
+    if on_path:
+        return on_path
+    xv = os.environ.get("XILINX_VIVADO", "")
+    if xv and os.access(os.path.join(xv, "bin", "vivado"), os.X_OK):
+        return os.path.join(xv, "bin", "vivado")
+    found = []
+    roots = [os.environ.get("XILINX_ROOT", ""), "~/Xilinx", "~/xilinx", "/tools/Xilinx", "/opt/Xilinx", "/opt/xilinx"]
+    for root in filter(None, roots):
+        root = os.path.expanduser(root)
+        for p in glob.glob(f"{root}/Vivado/*/bin/vivado") + glob.glob(f"{root}/*/Vivado/bin/vivado"):
+            m = re.search(r"/(\d{4})\.(\d+)/", p)
+            if m and os.access(p, os.X_OK):
+                found.append(((int(m.group(1)), int(m.group(2))), p))
+    return max(found)[1] if found else "vivado"
+
+
 class ScLink(BridgeOps):
     def __init__(self, vivado=None, serial=None):
-        self.vivado = vivado or os.environ.get(
-            "VIVADO", os.path.expanduser("~/Xilinx/2026.1/Vivado/bin/vivado"))
+        self.vivado = vivado or find_vivado()
         # No default: a bench with more than one card must say which one, and a
         # baked-in serial is somebody else's board.
         self.serial = serial or os.environ.get("SCLINK_SERIAL", "").strip()
