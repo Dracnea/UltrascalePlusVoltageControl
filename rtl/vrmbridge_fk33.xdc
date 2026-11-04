@@ -42,4 +42,5 @@ set_property PACKAGE_PIN BB36 [get_ports vaux12_p]
 set_property PACKAGE_PIN BC36 [get_ports vaux12_n]
 set_property PACKAGE_PIN BE34 [get_ports vaux13_p]
 set_property PACKAGE_PIN BE35 [get_ports vaux13_n]
-set_property IOSTANDARD LVCMOS18 [get_ports {vaux*_p vaux*_n}]
+# ANALOG: the auxiliary analog inputs need it (DRC ANALOGSTD-2 refuses LVCMOS18 on them).
+set_property IOSTANDARD ANALOG [get_ports {vaux*_p vaux*_n}]
