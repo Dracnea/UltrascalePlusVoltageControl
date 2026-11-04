@@ -30,17 +30,21 @@ if {$kind eq "vrm"} {
     add_files [list [file join $here pmbus_i2c.sv] [file join $here vrmbridge_top.sv]]
     set_property file_type SystemVerilog [get_files *.sv]
     if {$board eq "fk33"} {
-        set xdc vrmbridge_fk33.xdc; set clk_hz 200000000
-        set pins {vrm_scl BB24 vrm_sda BA24 clk_p BC26}
+        set xdc vrmbridge_fk33.xdc; set clk_hz 200000000; set defs {VRM_VAUX}
+        set pins {vrm_scl BB24 vrm_sda BA24 clk_p BC26
+                  vaux0_p AV33 vaux0_n AW33 vaux4_p BB34 vaux4_n BB35 vaux5_p BC35 vaux5_n BD35
+                  vaux8_p AY34 vaux8_n BA34 vaux12_p BB36 vaux12_n BC36 vaux13_p BE34 vaux13_n BE35}
     } else {
-        set xdc vrmbridge_th5x.xdc; set clk_hz 100000000
+        set xdc vrmbridge_th5x.xdc; set clk_hz 100000000; set defs {}
         set pins {vrm_scl L12 vrm_sda L13 clk_p BB18}
     }
     add_files -fileset constrs_1 [list [file join $here $xdc]]
     set_property top vrmbridge_top [current_fileset]
     update_compile_order -fileset sources_1
 
-    synth_design -top vrmbridge_top -part $part -generic CLK_HZ=$clk_hz
+    set vdef {}
+    foreach d $defs { lappend vdef -verilog_define $d }
+    synth_design -top vrmbridge_top -part $part -generic CLK_HZ=$clk_hz {*}$vdef
     opt_design
     place_design
     route_design

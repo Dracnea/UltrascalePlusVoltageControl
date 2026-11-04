@@ -244,6 +244,42 @@ class Board:
         return out
 
 
+OP_AUXA, OP_AUXB = 0x09, 0x0A        # vrmbridge built with VRM_VAUX (FK33 builds since 2026-11-04)
+BRIDGE_ID = 0x5642
+
+
+def aux(link):
+    """The FK33's board sensors on SYSMON VAUX, or None from a bridge without them.
+
+    A bridge without VRM_VAUX ignores 0x09 / 0x0A and keeps its last result, so
+    SYSMON (which carries no ID) is asked first: AUXB answering with the bridge
+    ID is then proof of this build. Raw codes are unipolar, 1 V full scale.
+    The current-sense scale is not documented by SQRL, so currents are shown
+    as the sense voltage until calibrated; nothing here gates a write."""
+    link.ask(V.OP_SYSMON)
+    b = link.ask(OP_AUXB)
+    if b is None or (b >> 48) & 0xFFFF != BRIDGE_ID or (b >> 32) & 0xFFFF:
+        return None
+    a = link.ask(OP_AUXA)
+    code = lambda w, i: (w >> (16 * i)) & 0xFFFF
+    sense = lambda c: c * 1000.0 / 65536           # mV at the pin
+    return {"in12v_v": code(a, 0) * 15.2 / 65536,
+            "vccint_sense_mv": sense(code(a, 1)),
+            "vcchbm_sense_mv": sense(code(a, 2)),
+            "vccbram_sense_mv": sense(code(a, 3)),
+            "ltc3636_vccaux_c": code(b, 0) * 400.0 / 65536 - 273.15,
+            "ltc3636_vccmgt_c": code(b, 1) * 400.0 / 65536 - 273.15}
+
+
+def aux_line(x):
+    if not x:
+        return "board inputs: none (this vrmbridge_fk33.bit predates the VAUX readout)"
+    return (f"board inputs: 12 V in {x['in12v_v']:.2f} V; current sense (uncalibrated) VCCINT "
+            f"{x['vccint_sense_mv']:.1f} mV, VCCBRAM {x['vccbram_sense_mv']:.1f} mV, VCCHBM "
+            f"{x['vcchbm_sense_mv']:.1f} mV; LTC3636 VCCAUX {x['ltc3636_vccaux_c']:.1f} C, "
+            f"VCCMGT {x['ltc3636_vccmgt_c']:.1f} C")
+
+
 def sysmon(link, n=6):
     s = [link.sysmon() for _ in range(n)]
     if not s or not all(s) or not s[0]["vccint_mv"]:
@@ -321,6 +357,7 @@ def run(link, a, sleep=time.sleep, out=print):
     t = board.temps()
     if t:
         out("board sensors: " + ", ".join(f"{k} {v:.1f} C" for k, v in t.items()))
+    out(aux_line(aux(link)))
 
     declared = states_from(a)
     hbm_state = "modded" if a.hbm_mod == "swapped" else "stock"
@@ -586,6 +623,30 @@ def selftest():
     ok = l.codes[POT["vccint"]] == CODE_POWER_ON
     fails += not ok
     print(f"{'PASS' if ok else 'FAIL'} VCCINT put back to code 128 after the heat abort")
+
+    # VAUX readout: a VRM_VAUX bridge answers AUXB with its ID; an older one keeps the SYSMON word.
+    class AuxLink:
+        def __init__(self, vaux):
+            self.vaux, self.result = vaux, 0
+
+        def ask(self, op, arg=0):
+            if op == V.OP_SYSMON:
+                self.result = (0x4600 << 48) | (0x9900 << 32) | (0x4500 << 16) | 0x9C00
+            elif self.vaux and op == OP_AUXB:
+                self.result = (BRIDGE_ID << 48) | (0x4B00 << 16) | 0x4A00
+            elif self.vaux and op == OP_AUXA:
+                self.result = (0x0800 << 48) | (0x0400 << 32) | (0x2000 << 16) | 0xCA00
+            return self.result
+    x = aux(AuxLink(True))
+    ok = (x is not None and abs(x["in12v_v"] - 0xCA00 * 15.2 / 65536) < 1e-9
+          and abs(x["vccint_sense_mv"] - 125.0) < 1e-9 and abs(x["vccbram_sense_mv"] - 31.25) < 1e-9
+          and abs(x["vcchbm_sense_mv"] - 15.625) < 1e-9
+          and abs(x["ltc3636_vccaux_c"] - (0x4A00 * 400 / 65536 - 273.15)) < 1e-9)
+    fails += not ok
+    print(f"{'PASS' if ok else 'FAIL'} VAUX bridge: 12 V, three current senses, LTC3636 temps decoded")
+    ok = aux(AuxLink(False)) is None and "predates" in aux_line(None)
+    fails += not ok
+    print(f"{'PASS' if ok else 'FAIL'} a bridge without VAUX is told apart (no readout, said so)")
     print(f"== {fails} failure(s)")
     return 1 if fails else 0
 

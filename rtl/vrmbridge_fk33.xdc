@@ -24,3 +24,22 @@ set_false_path -to   [get_ports {vrm_scl vrm_sda}]
 
 set_property CFGBVS GND [current_design]
 set_property CONFIG_VOLTAGE 1.8 [current_design]
+
+# SYSMON auxiliary analog inputs (bank 66): the board's sensors, as SQRL's example
+# design enables them (OhGodAPet/SQRL_FK33 projects/fk33_example.tcl, Vaux 0/4/5/8/12/13;
+# readings named in scripts/fk33_jtagaxi.tcl). Pins from the xcvu33p-fsvh2104 package
+# file (IO_*_ADnP/N_66). Inputs only, used as analog: the IOSTANDARD is for DRC and
+# drives nothing. Compiled in with VRM_VAUX (build.tcl sets it for the FK33).
+set_property PACKAGE_PIN AV33 [get_ports vaux0_p]
+set_property PACKAGE_PIN AW33 [get_ports vaux0_n]
+set_property PACKAGE_PIN BB34 [get_ports vaux4_p]
+set_property PACKAGE_PIN BB35 [get_ports vaux4_n]
+set_property PACKAGE_PIN BC35 [get_ports vaux5_p]
+set_property PACKAGE_PIN BD35 [get_ports vaux5_n]
+set_property PACKAGE_PIN AY34 [get_ports vaux8_p]
+set_property PACKAGE_PIN BA34 [get_ports vaux8_n]
+set_property PACKAGE_PIN BB36 [get_ports vaux12_p]
+set_property PACKAGE_PIN BC36 [get_ports vaux12_n]
+set_property PACKAGE_PIN BE34 [get_ports vaux13_p]
+set_property PACKAGE_PIN BE35 [get_ports vaux13_n]
+set_property IOSTANDARD LVCMOS18 [get_ports {vaux*_p vaux*_n}]
