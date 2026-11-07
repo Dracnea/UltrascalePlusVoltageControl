@@ -23,6 +23,14 @@
 //     op 0x01  SYSMON  result = {vccbram, vccaux, vccint, temp}, 16 bits each
 //                      -- scbridge's layout, plus VCCBRAM in the top word
 //     op 0x05  LINES   result = {ID, 38'd0, scl_lvl, sda_lvl, 8'd0}
+//     op 0x09  AUX     (FK33_AUX builds only) result = {VAUX13, VAUX12, VAUX5, VAUX0}
+//                      raw SYSMON codes: VCCBRAM current, VCCHBM current,
+//                      VCCINT current, 12 V input (x15.2 divider). Scales of the
+//                      three current-sense lines are not published by SQRL.
+//     op 0x0A  AUXT    (FK33_AUX builds only) result = {AUX_ID, 16'd0, VAUX8, VAUX4}
+//                      VCCMGT / VCCAUX LTC3636 regulator temperatures (raw).
+//                      AUX_ID = 16'h5641 ("VA"): a bridge without the aux inputs
+//                      never answers with it, so the host can tell them apart.
 //     op 0x08  PMBUS   arg[2:0] mode, [14:8] addr, [23:16] reg, [39:24] data
 //                      (modes 0-7 in pmbus_i2c.sv); result while running has
 //                      `busy`, and the finished result replaces it:
@@ -45,8 +53,20 @@ module vrmbridge_top #(
     input  wire clk_n,
     inout  wire vrm_scl,
     inout  wire vrm_sda
+`ifdef FK33_AUX
+    ,
+    // SQRL FK33 board analog lines into SYSMON's auxiliary inputs (bank 66),
+    // from SQRL's fk33_example design and fk33_jtagaxi.tcl. Read only.
+    input  wire vaux0_p,  input wire vaux0_n,     // 12 V input, /15.2
+    input  wire vaux4_p,  input wire vaux4_n,     // LTC3636 VCCAUX regulator temperature
+    input  wire vaux5_p,  input wire vaux5_n,     // VCCINT current sense
+    input  wire vaux8_p,  input wire vaux8_n,     // LTC3636 VCCMGT regulator temperature
+    input  wire vaux12_p, input wire vaux12_n,    // VCCHBM current sense
+    input  wire vaux13_p, input wire vaux13_n     // VCCBRAM current sense
+`endif
 );
     localparam [15:0] ID = 16'h5642;
+    localparam [15:0] AUX_ID = 16'h5641;
 
     wire clk_raw, clk;
     IBUFDS u_ibuf (.I(clk_p), .IB(clk_n), .O(clk_raw));
@@ -79,7 +99,8 @@ module vrmbridge_top #(
     wire  [15:0] dout;
     wire         drdy;
     logic [15:0] temp_code = '0, vccint_code = '0, vccaux_code = '0, vccbram_code = '0;
-    logic [1:0]  which = '0;
+    logic [15:0] aux0 = '0, aux4 = '0, aux5 = '0, aux8 = '0, aux12 = '0, aux13 = '0;
+    logic [3:0]  which = '0;
     logic [9:0]  sm_div = '0;
 
     // SYSMON's ADC clock is DCLK / INIT_42[15:8] and must stay under ~5.2 MHz.
@@ -87,30 +108,67 @@ module vrmbridge_top #(
     // is kept for them; at the FK33's 200 MHz it ran the ADC at 50 MHz and every
     // conversion read 0, so faster clocks get a divider that lands at <= 5 MHz.
     localparam integer SM_DIV = (CLK_HZ > 100_000_000) ? (CLK_HZ + 4_999_999) / 5_000_000 : 4;
-    SYSMONE4 #(.INIT_40(16'h0000), .INIT_41(16'h0000), .INIT_42({8'(SM_DIV), 8'h00}))
+`ifdef FK33_AUX
+    // Continuous sequence (values from Vivado 2024.2's System Management Wizard
+    // for this channel set): INIT_48 = calibration, temperature, VCCINT, VCCAUX,
+    // VCCBRAM; INIT_49 = VAUX 0, 4, 5, 8, 12, 13, unipolar. INIT_41 = sequencer
+    // continuous, calibration on, alarms off EXCEPT over-temperature (bit 0 = 0,
+    // still enabled, as in the default-mode build).
+    localparam [15:0] SM_INIT_41 = 16'h2F9E;
+    localparam [15:0] SM_INIT_48 = 16'h4F01;
+    localparam [15:0] SM_INIT_49 = 16'h3131;
+    localparam integer NREG = 10;
+    wire [15:0] vauxp = {2'b00, vaux13_p, vaux12_p, 3'b000, vaux8_p, 2'b00, vaux5_p, vaux4_p, 3'b000, vaux0_p};
+    wire [15:0] vauxn = {2'b00, vaux13_n, vaux12_n, 3'b000, vaux8_n, 2'b00, vaux5_n, vaux4_n, 3'b000, vaux0_n};
+`else
+    localparam [15:0] SM_INIT_41 = 16'h0000;
+    localparam [15:0] SM_INIT_48 = 16'h0000;
+    localparam [15:0] SM_INIT_49 = 16'h0000;
+    localparam integer NREG = 4;
+    wire [15:0] vauxp = 16'd0;
+    wire [15:0] vauxn = 16'd0;
+`endif
+    SYSMONE4 #(.INIT_40(16'h0000), .INIT_41(SM_INIT_41), .INIT_42({8'(SM_DIV), 8'h00}),
+               .INIT_48(SM_INIT_48), .INIT_49(SM_INIT_49))
     u_sysmon (
         .DADDR(daddr), .DCLK(clk), .DEN(den), .DI(16'h0000), .DWE(1'b0),
         .DO(dout), .DRDY(drdy), .RESET(1'b0),
         .CONVST(1'b0), .CONVSTCLK(1'b0),
-        .VAUXN(16'd0), .VAUXP(16'd0), .VN(1'b0), .VP(1'b0));
+        .VAUXN(vauxn), .VAUXP(vauxp), .VN(1'b0), .VP(1'b0));
+
+    // status registers: 0x00 temp, 0x01 VCCINT, 0x02 VCCAUX, 0x06 VCCBRAM,
+    // then (FK33_AUX) 0x10 + n for VAUX n.
+    function automatic [7:0] reg_of(input [3:0] w);
+        case (w)
+            4'd0: reg_of = 8'h00;  4'd1: reg_of = 8'h01;
+            4'd2: reg_of = 8'h02;  4'd3: reg_of = 8'h06;
+            4'd4: reg_of = 8'h10;  4'd5: reg_of = 8'h14;
+            4'd6: reg_of = 8'h15;  4'd7: reg_of = 8'h18;
+            4'd8: reg_of = 8'h1C;  default: reg_of = 8'h1D;
+        endcase
+    endfunction
 
     always_ff @(posedge clk) begin
         den <= 1'b0;
         sm_div <= sm_div + 1'b1;
         if (sm_div == 10'd1023) begin
-            // status registers: 0x00 temp, 0x01 VCCINT, 0x02 VCCAUX, 0x06 VCCBRAM
-            daddr <= (which == 2'd0) ? 8'h00 : (which == 2'd1) ? 8'h01
-                   : (which == 2'd2) ? 8'h02 : 8'h06;
+            daddr <= reg_of(which);
             den   <= 1'b1;
         end
         if (drdy) begin
             case (which)
-                2'd0: temp_code   <= dout;
-                2'd1: vccint_code <= dout;
-                2'd2: vccaux_code <= dout;
-                default: vccbram_code <= dout;
+                4'd0: temp_code    <= dout;
+                4'd1: vccint_code  <= dout;
+                4'd2: vccaux_code  <= dout;
+                4'd3: vccbram_code <= dout;
+                4'd4: aux0  <= dout;
+                4'd5: aux4  <= dout;
+                4'd6: aux5  <= dout;
+                4'd7: aux8  <= dout;
+                4'd8: aux12 <= dout;
+                default: aux13 <= dout;
             endcase
-            which <= which + 1'b1;
+            which <= (which == 4'(NREG - 1)) ? 4'd0 : which + 1'b1;
         end
     end
 
@@ -158,6 +216,10 @@ module vrmbridge_top #(
             case (op)
                 8'h01: result <= {vccbram_code, vccaux_code, vccint_code, temp_code};
                 8'h05: result <= {ID, 38'd0, lvl_s, 8'd0};
+`ifdef FK33_AUX
+                8'h09: result <= {aux13, aux12, aux5, aux0};
+                8'h0A: result <= {AUX_ID, 16'd0, aux8, aux4};
+`endif
                 8'h08: if (!busy) begin
                     mode  <= arg[2:0];
                     addr  <= arg[14:8];

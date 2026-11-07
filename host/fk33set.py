@@ -244,6 +244,39 @@ class Board:
         return out
 
 
+# Board analog lines on SYSMON's auxiliary inputs (vrmbridge built with FK33_AUX).
+# Channel map from SQRL's fk33_jtagaxi.tcl: VAUX0 12 V input (/15.2), VAUX5/12/13
+# VCCINT/VCCHBM/VCCBRAM current sense, VAUX4/8 LTC3636 VCCAUX/VCCMGT temperature.
+# The current-sense scales (A per mV) are NOT published: reported as sense mV until
+# calibrated on a card. Read only; nothing here can write anything.
+OP_AUX, OP_AUXT, AUX_ID = 0x09, 0x0A, 0x5641
+V12_DIV = 15.2
+
+
+def aux(link):
+    """The board's analog lines, or None on a bridge built without them."""
+    t = link.ask(OP_AUXT)
+    if (t >> 48) & 0xFFFF != AUX_ID:
+        return None
+    r = link.ask(OP_AUX)
+    w = lambda x, i: (x >> (16 * i)) & 0xFFFF
+    mv = lambda c: round(c * 1000.0 / 65536, 1)                 # unipolar, 1 V full scale
+    reg_c = lambda c: round(c * 400.0 / 65536 - 273.15, 1)      # SQRL's conversion
+    return {"in12_v": round(w(r, 0) * V12_DIV / 65536, 3),
+            "vccint_isense_mv": mv(w(r, 1)), "vcchbm_isense_mv": mv(w(r, 2)),
+            "vccbram_isense_mv": mv(w(r, 3)),
+            "vccaux_reg_c": reg_c(w(t, 0)), "vccmgt_reg_c": reg_c(w(t, 1)),
+            "raw": {"vaux0": w(r, 0), "vaux5": w(r, 1), "vaux12": w(r, 2), "vaux13": w(r, 3),
+                    "vaux4": w(t, 0), "vaux8": w(t, 1)}}
+
+
+def aux_line(a):
+    return (f"board analog: 12 V in {a['in12_v']:.2f} V; current sense (uncalibrated) "
+            f"VCCINT {a['vccint_isense_mv']:.1f} mV, VCCHBM {a['vcchbm_isense_mv']:.1f} mV, "
+            f"VCCBRAM {a['vccbram_isense_mv']:.1f} mV; LTC3636 VCCAUX {a['vccaux_reg_c']:.1f} C, "
+            f"VCCMGT {a['vccmgt_reg_c']:.1f} C; raw {a['raw']}")
+
+
 def sysmon(link, n=6):
     s = [link.sysmon() for _ in range(n)]
     if not s or not all(s) or not s[0]["vccint_mv"]:
@@ -321,6 +354,9 @@ def run(link, a, sleep=time.sleep, out=print):
     t = board.temps()
     if t:
         out("board sensors: " + ", ".join(f"{k} {v:.1f} C" for k, v in t.items()))
+    ax = aux(link)
+    if ax:
+        out(aux_line(ax))
 
     declared = states_from(a)
     hbm_state = "modded" if a.hbm_mod == "swapped" else "stock"
@@ -403,6 +439,9 @@ def run(link, a, sleep=time.sleep, out=print):
     t = board.temps()
     if t:
         out("board sensors after: " + ", ".join(f"{k} {v:.1f} C" for k, v in t.items()))
+    ax = aux(link)
+    if ax:
+        out(aux_line(ax).replace("board analog:", "board analog after:"))
     for r, (code, want) in plan.items():
         if r in SYSMON_KEY:
             got = after[SYSMON_KEY[r]]

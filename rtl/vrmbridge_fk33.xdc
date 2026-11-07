@@ -24,3 +24,23 @@ set_false_path -to   [get_ports {vrm_scl vrm_sda}]
 
 set_property CFGBVS GND [current_design]
 set_property CONFIG_VOLTAGE 1.8 [current_design]
+
+# SYSMON auxiliary analog inputs (bank 66, built with FK33_AUX), from SQRL's
+# fk33_example design (ANALOG_BANK_SELECTION 66) and fk33_jtagaxi.tcl:
+#   VAUX0 12 V input (/15.2), VAUX4 LTC3636 VCCAUX temp, VAUX5 VCCINT current,
+#   VAUX8 LTC3636 VCCMGT temp, VAUX12 VCCHBM current, VAUX13 VCCBRAM current.
+# Pins are the package's IO_*_AD<n>P/N_66 (xcvu33p-fsvh2104, Vivado 2024.2).
+# Inputs only: SYSMON samples them, nothing in the fabric drives them.
+set_property PACKAGE_PIN AV33 [get_ports vaux0_p]
+set_property PACKAGE_PIN AW33 [get_ports vaux0_n]
+set_property PACKAGE_PIN BB34 [get_ports vaux4_p]
+set_property PACKAGE_PIN BB35 [get_ports vaux4_n]
+set_property PACKAGE_PIN BC35 [get_ports vaux5_p]
+set_property PACKAGE_PIN BD35 [get_ports vaux5_n]
+set_property PACKAGE_PIN AY34 [get_ports vaux8_p]
+set_property PACKAGE_PIN BA34 [get_ports vaux8_n]
+set_property PACKAGE_PIN BB36 [get_ports vaux12_p]
+set_property PACKAGE_PIN BC36 [get_ports vaux12_n]
+set_property PACKAGE_PIN BE34 [get_ports vaux13_p]
+set_property PACKAGE_PIN BE35 [get_ports vaux13_n]
+set_property IOSTANDARD ANALOG [get_ports {vaux*_p vaux*_n}]
