@@ -13,7 +13,7 @@ VCCINT on a **TUL TH53 / TH55**, and all three rails on an **SQRL FK33**, are su
 | Alveo U55C | VCCINT, VCCBRAM, VCCMEM | satellite controller (extended firmware) | verified on hardware |
 | TUL TH53 (xcvu33p) | VCCINT | PMBus regulator on fabric pins — [docs/th5x.md](docs/th5x.md) | confirmed on hardware |
 | TUL TH55 (xcvu35p) | VCCINT | PMBus regulator on fabric pins — [docs/th5x.md](docs/th5x.md) | confirmed on hardware |
-| SQRL FK33 (xcvu33p) | VCCINT, VCCBRAM, VCCHBM | digital potentiometers on fabric pins; stock vs resistor-modded boards detected on-die — [docs/fk33.md](docs/fk33.md) | confirmed on hardware (stock board); no Vivado needed |
+| SQRL FK33 (xcvu33p) | VCCINT, VCCBRAM, VCCHBM | digital potentiometers on fabric pins; stock vs resistor-modded boards detected on-die; board power (12 V in, rail current sense) on SYSMON's auxiliary inputs, readable from any design — [docs/fk33.md](docs/fk33.md#board-power-telemetry-sysmon-auxiliary-inputs) | confirmed on hardware (stock board); no Vivado needed |
 
 ```console
 $ ./changeVoltage.sh --vccint 720 --vccbram min --vccmem min

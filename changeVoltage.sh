@@ -277,7 +277,8 @@ fi
 for xzf in "$HERE"/rtl/prebuilt/*bridge_*.bit.xz; do
     [ -f "$xzf" ] || continue
     raw="$HERE/rtl/$(basename "${xzf%.xz}")"
-    [ -f "$raw" ] || { echo "unpacking $(basename "$xzf")"; xz -dc "$xzf" > "$raw"; }
+    # re-unpack when the shipped copy is newer (an update), so an old unpacked bridge is not kept
+    if [ ! -f "$raw" ] || [ "$xzf" -nt "$raw" ]; then echo "unpacking $(basename "$xzf")"; xz -dc "$xzf" > "$raw"; fi
 done
 if [ -n "$FTDI" ]; then
     if [ -z "$BIT" ]; then
