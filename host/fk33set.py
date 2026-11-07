@@ -63,7 +63,7 @@ SAFETY
       reachable. So `min` on VCCINT is refused on every board, and on VCCBRAM
       on a modded one. Below the floor the fabric is out of its specified
       range and the regulators run at the bottom of their feedback range,
-      with no telemetry on this board to show how they cope. Mining runs
+      with no telemetry on this board to show how they cope. Boards are run
       there routinely; it must be asked for, not reached by default.
     - Temperatures: before anything is written, the die (SYSMON) and the
       three board sensors must read below TEMP_MAX_C, and the board sensors
